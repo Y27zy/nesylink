@@ -16,7 +16,7 @@
 
 ## 安装
 
-从源码安装：
+从源码安装
 
 ```bash
 git clone <repo-url>

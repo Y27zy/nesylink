@@ -8,18 +8,18 @@ from .task4 import Task4Controller
 from .task5 import Task5Controller
 
 
+_CONTROLLER_BY_TASK = {
+    "mathematical_logic/task_1": Task1Controller,
+    "mathematical_logic/task_2": Task2Controller,
+    "mathematical_logic/task_3": Task3Controller,
+    "mathematical_logic/task_4": Task4Controller,
+    "mathematical_logic/task_5": Task5Controller,
+}
+
+
 def make_controller(task_id: str | None) -> BaseController:
-    if task_id == "mathematical_logic/task_1":
-        return Task1Controller()
-    if task_id == "mathematical_logic/task_2":
-        return Task2Controller()
-    if task_id == "mathematical_logic/task_3":
-        return Task3Controller()
-    if task_id == "mathematical_logic/task_4":
-        return Task4Controller()
-    if task_id == "mathematical_logic/task_5":
-        return Task5Controller()
-    return BaseController()
+    controller_cls = _CONTROLLER_BY_TASK.get(task_id, BaseController)
+    return controller_cls()
 
 
 __all__ = [

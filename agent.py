@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from controllers import make_controller
+from nesylink.core.constants import ACTION_NOOP
 from state import AgentMemory
 from vision import extract_symbolic_state
 
@@ -19,6 +20,7 @@ class Policy:
         self.task_id = task_id
         self.memory = AgentMemory(seed=seed, task_id=task_id)
         self.controller = make_controller(task_id)
+        self.memory.notes["controller"] = type(self.controller).__name__
         self.controller.reset(seed=seed, task_id=task_id)
 
     def act(self, obs: Any, info: dict[str, Any] | None = None) -> int:
@@ -26,7 +28,10 @@ class Policy:
         # coordinates, room id, entity counts, or dynamic-object truth.
         inventory = (info or {}).get("inventory", {})
         state = extract_symbolic_state(obs, self.memory, inventory=inventory)
-        return self.controller.act(state, self.memory)
+        try:
+            return int(self.controller.act(state, self.memory))
+        except (TypeError, ValueError):
+            return ACTION_NOOP
 
 
 def make_policy() -> Policy:
