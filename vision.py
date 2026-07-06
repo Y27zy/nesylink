@@ -5,6 +5,8 @@ from typing import Any
 import numpy as np
 
 from state import AgentMemory, SymbolicState
+from vision_dynamic_resnet import extract_dynamic_objects
+from vision_static_resnet import extract_static_tiles
 
 
 TILE_SIZE = 16
@@ -38,6 +40,20 @@ def extract_symbolic_state(
     if isinstance(obs, np.ndarray):
         state.raw_features["obs_shape"] = tuple(obs.shape)
         state.raw_features["obs_dtype"] = str(obs.dtype)
+        static = extract_static_tiles(obs)
+        state.walls = static.walls
+        state.floors = static.floors
+        state.chests = static.chests
+        state.exits = static.exits
+        state.raw_features["static_vision_backend"] = static.backend
+        state.raw_features["static_labels"] = static.labels
+        state.raw_features["static_confidences"] = static.confidences
+        dynamic = extract_dynamic_objects(obs)
+        state.player = dynamic.player
+        state.monsters = dynamic.monsters
+        state.raw_features["dynamic_vision_backend"] = dynamic.backend
+        state.raw_features["dynamic_objects"] = dynamic.objects
+        state.raw_features["player_bbox"] = dynamic.player_bbox
 
     return state
 
@@ -49,4 +65,3 @@ def tile_center_px(pos: tuple[int, int]) -> tuple[int, int]:
 
 def pixel_to_tile(x: int, y: int) -> tuple[int, int]:
     return (x // TILE_SIZE, y // TILE_SIZE)
-
