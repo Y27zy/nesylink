@@ -8,6 +8,9 @@ from nesylink.core.constants import (
     ACTION_LEFT,
     ACTION_RIGHT,
     ACTION_UP,
+    MAP_HEIGHT_TILES,
+    MAP_WIDTH_TILES,
+    TILE_SIZE,
 )
 
 from state import Position, SymbolicState
@@ -18,7 +21,7 @@ MOVE_ACTIONS = (ACTION_UP, ACTION_DOWN, ACTION_LEFT, ACTION_RIGHT)
 
 def in_bounds(pos: Position) -> bool:
     x, y = pos
-    return 0 <= x < 10 and 0 <= y < 8
+    return 0 <= x < MAP_WIDTH_TILES and 0 <= y < MAP_HEIGHT_TILES
 
 
 def neighbors(pos: Position) -> Iterable[Position]:
@@ -32,7 +35,10 @@ def neighbors(pos: Position) -> Iterable[Position]:
 def is_safe_tile(state: SymbolicState, pos: Position) -> bool:
     if not in_bounds(pos):
         return False
-    blocked = state.walls | state.traps | state.monsters | state.chests | state.gaps
+    bridge_tiles = state.bridges
+    blocked = state.walls | state.monsters | state.chests
+    blocked |= state.traps - bridge_tiles
+    blocked |= state.gaps - bridge_tiles
     return pos not in blocked
 
 
@@ -97,6 +103,5 @@ def actions_for_tile_path(path: list[Position]) -> list[int]:
     actions: list[int] = []
     for current, nxt in zip(path, path[1:]):
         action = action_from_step(current, nxt)
-        actions.extend([action] * 16)
+        actions.extend([action] * TILE_SIZE)
     return actions
-
