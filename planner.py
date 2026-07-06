@@ -77,6 +77,22 @@ def bfs_path(state: SymbolicState, goals: set[Position]) -> list[Position] | Non
     return None
 
 
+def adjacent_goal_tiles(state: SymbolicState, targets: set[Position]) -> set[Position]:
+    goals: set[Position] = set()
+    for target in targets:
+        for pos in neighbors(target):
+            if is_safe_tile(state, pos):
+                goals.add(pos)
+    return goals
+
+
+def bfs_path_to_adjacent_target(
+    state: SymbolicState,
+    targets: set[Position],
+) -> list[Position] | None:
+    return bfs_path(state, adjacent_goal_tiles(state, targets))
+
+
 def actions_for_tile_path(path: list[Position]) -> list[int]:
     actions: list[int] = []
     for current, nxt in zip(path, path[1:]):
