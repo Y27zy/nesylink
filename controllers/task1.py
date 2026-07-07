@@ -2,46 +2,67 @@ from __future__ import annotations
 
 from nesylink.core.constants import (
     ACTION_A,
-    ACTION_LEFT,
     ACTION_NOOP,
-    ACTION_RIGHT,
     ACTION_UP,
 )
 
-from state import AgentMemory, SymbolicState
+from planner import (
+    actions_for_tile_path,
+    bfs_path,
+    bfs_path_to_adjacent_target,
+)
+from state import AgentMemory, Position, SymbolicState
 
 
-def repeat(action: int, count: int) -> list[int]:
-    return [action] * count
-
-
-def build_reference_plan() -> list[int]:
-    plan: list[int] = []
-    plan += repeat(ACTION_RIGHT, 48)
-    plan += repeat(ACTION_UP, 48)
-    plan += repeat(ACTION_LEFT, 96)
-    plan.append(ACTION_A)
-    plan += repeat(ACTION_RIGHT, 32)
-    plan += repeat(ACTION_UP, 48)
-    plan += repeat(ACTION_RIGHT, 16)
-    plan += repeat(ACTION_UP, 20)
-    return plan
+TASK_PHASE_KEY = "task1_phase"
 
 
 class Task1Controller:
-    def __init__(self) -> None:
-        self.plan = build_reference_plan()
-        self.index = 0
-
     def reset(self, seed: int | None = None, task_id: str | None = None) -> None:
         del seed, task_id
-        self.index = 0
+
+    def _follow_or_plan(
+        self,
+        memory: AgentMemory,
+        path: list[Position] | None,
+    ) -> int | None:
+        if path is None:
+            return None
+        actions = actions_for_tile_path(path)
+        if not actions:
+            return None
+        memory.planned_actions = actions
+        return memory.planned_actions.pop(0)
 
     def act(self, state: SymbolicState, memory: AgentMemory) -> int:
-        del state, memory
-        if self.index >= len(self.plan):
+        if memory.planned_actions:
+            return memory.planned_actions.pop(0)
+
+        if state.player is None:
+            memory.notes[TASK_PHASE_KEY] = "waiting_for_vision"
             return ACTION_NOOP
-        action = self.plan[self.index]
-        self.index += 1
-        return action
+
+        if state.keys <= 0 and state.chests:
+            memory.notes[TASK_PHASE_KEY] = "collect_key"
+            path = bfs_path_to_adjacent_target(state, state.chests)
+            action = self._follow_or_plan(memory, path)
+            if action is not None:
+                return action
+            return ACTION_A
+
+        if state.keys > 0 and state.exits:
+            memory.notes[TASK_PHASE_KEY] = "exit"
+            path = bfs_path(state, state.exits)
+            action = self._follow_or_plan(memory, path)
+            if action is not None:
+                return action
+            if state.player in state.exits:
+                return ACTION_UP
+
+        if state.keys > 0 and state.player is not None and state.player[1] == 0:
+            memory.notes[TASK_PHASE_KEY] = "exit_north"
+            return ACTION_UP
+
+        memory.notes[TASK_PHASE_KEY] = "no_action"
+        return ACTION_NOOP
 
