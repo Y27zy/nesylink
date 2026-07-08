@@ -45,6 +45,7 @@ def extract_symbolic_state(
         state.walls = static.walls
         state.floors = static.floors
         state.chests = static.chests
+        state.opened_chests = static.opened_chests
         state.exits = static.exits
         state.raw_features["static_vision_backend"] = static.backend
         state.raw_features["static_labels"] = static.labels
@@ -61,9 +62,6 @@ def extract_symbolic_state(
         state.bridges = interactive.bridges
         state.gaps = interactive.gaps
         state.traps = interactive.traps
-        if state.player is not None:
-            state.buttons.discard(state.player)
-            state.switches.discard(state.player)
         state.raw_features["interactive_vision_backend"] = interactive.backend
 
     return state

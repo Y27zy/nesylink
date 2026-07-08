@@ -58,6 +58,7 @@ class StaticVisionResult:
     walls: set[Position]
     floors: set[Position]
     chests: set[Position]
+    opened_chests: set[Position]
     exits: set[Position]
     labels: dict[Position, TileLabel]
     confidences: dict[Position, float]
@@ -79,10 +80,17 @@ class OptionalResNetTileClassifier:
         self.backend = "rules"
         self._try_load_resnet()
 
-    def classify(self, tile: np.ndarray) -> tuple[TileLabel, float]:
+    def classify(
+        self,
+        tile: np.ndarray,
+        *,
+        allow_exit: bool = True,
+    ) -> tuple[TileLabel, float]:
         if self.model is not None and self.torch is not None:
-            return self._classify_with_resnet(tile)
-        return classify_static_tile_rules(tile)
+            label, confidence = self._classify_with_resnet(tile)
+            if label != "exit" or allow_exit:
+                return label, confidence
+        return classify_static_tile_rules(tile, allow_exit=allow_exit)
 
     def _try_load_resnet(self) -> None:
         if not self.weights_path.exists():
@@ -182,6 +190,7 @@ def extract_static_tiles(obs: np.ndarray) -> StaticVisionResult:
     walls: set[Position] = set()
     floors: set[Position] = set()
     chests: set[Position] = set()
+    opened_chests: set[Position] = set()
     exits: set[Position] = set()
     for y in range(ROOM_HEIGHT_TILES):
         for x in range(ROOM_WIDTH_TILES):
@@ -190,7 +199,15 @@ def extract_static_tiles(obs: np.ndarray) -> StaticVisionResult:
                 y * TILE_SIZE : (y + 1) * TILE_SIZE,
                 x * TILE_SIZE : (x + 1) * TILE_SIZE,
             ]
-            label, confidence = classifier.classify(tile)
+            if is_open_chest_tile(tile):
+                labels[pos] = "unknown"
+                confidences[pos] = 1.0
+                opened_chests.add(pos)
+                continue
+            label, confidence = classifier.classify(
+                tile,
+                allow_exit=is_boundary_tile(pos),
+            )
             labels[pos] = label
             confidences[pos] = confidence
 
@@ -207,13 +224,14 @@ def extract_static_tiles(obs: np.ndarray) -> StaticVisionResult:
     for y in range(ROOM_HEIGHT_TILES):
         for x in range(ROOM_WIDTH_TILES):
             pos = (x, y)
-            if pos not in walls and pos not in chests:
+            if pos not in walls and pos not in chests and pos not in opened_chests:
                 floors.add(pos)
 
     return StaticVisionResult(
         walls=walls,
         floors=floors,
         chests=chests,
+        opened_chests=opened_chests,
         exits=exits,
         labels=labels,
         confidences=confidences,
@@ -221,9 +239,13 @@ def extract_static_tiles(obs: np.ndarray) -> StaticVisionResult:
     )
 
 
-def classify_static_tile_rules(tile: np.ndarray) -> tuple[TileLabel, float]:
+def classify_static_tile_rules(
+    tile: np.ndarray,
+    *,
+    allow_exit: bool = True,
+) -> tuple[TileLabel, float]:
     counts = {
-        name: count_near_color(tile, color, tolerance=12)
+        name: count_near_color(tile, color, tolerance=14)
         for name, color in PALETTE.items()
     }
 
@@ -252,19 +274,32 @@ def classify_static_tile_rules(tile: np.ndarray) -> tuple[TileLabel, float]:
     if wall_score > 0.22:
         return "wall", min(1.0, wall_score * 3)
 
-    has_chest_body = counts["chest_wood"] > 25 and counts["chest_band"] > 5
-    if has_chest_body:
+    closed_chest_band = count_near_color(
+        tile[4:7],
+        PALETTE["chest_band"],
+        tolerance=14,
+    )
+    has_closed_chest = counts["chest_wood"] > 25 and closed_chest_band > 18
+    if has_closed_chest:
         return "chest", min(1.0, chest_score * 5)
 
-    # Exits are rendered on room boundaries and often span two tiles.
-    conditional_exit = (
-        counts["exit_glow"] > 20
-        and counts["outline"] > 30
-        and counts["chest_band"] > 10
-        and counts["chest_wood"] < 10
-    )
-    if counts["door_wood"] > 25 or (counts["exit_glow"] > 20 and counts["shadow"] > 15) or conditional_exit:
-        return "exit", min(1.0, exit_score * 4)
+    if allow_exit:
+        # Exits always occupy boundary tiles. This prevents bridge planks and
+        # chest bands from being mistaken for doors.
+        normal_exit = (
+            counts["exit_glow"] > 12
+            and counts["shadow"] > 15
+            and counts["outline"] > 20
+        )
+        conditional_exit = (
+            counts["exit_glow"] > 12
+            and counts["outline"] > 30
+            and counts["chest_band"] > 10
+            and counts["chest_wood"] < 10
+        )
+        locked_exit = counts["door_wood"] > 25 and counts["outline"] > 20
+        if locked_exit or normal_exit or conditional_exit:
+            return "exit", min(1.0, exit_score * 4)
 
     if floor_score > 0.25:
         return "floor", min(1.0, floor_score * 3)
@@ -276,10 +311,28 @@ def count_near_color(tile: np.ndarray, color: tuple[int, int, int], *, tolerance
     return int(color_mask(tile, color, tolerance=tolerance).sum())
 
 
+def is_open_chest_tile(tile: np.ndarray) -> bool:
+    wood = count_near_color(tile, PALETTE["chest_wood"], tolerance=14)
+    top_band = count_near_color(tile[1:4], PALETTE["chest_band"], tolerance=14)
+    closed_band = count_near_color(tile[4:7], PALETTE["chest_band"], tolerance=14)
+    inner = count_near_color(tile[2:7], PALETTE["chest_inner"], tolerance=14)
+    return wood > 25 and top_band >= 12 and closed_band <= 18 and inner >= 12
+
+
 def color_mask(image: np.ndarray, color: tuple[int, int, int], *, tolerance: int) -> np.ndarray:
     target = np.asarray(color, dtype=np.int16)
     diff = np.abs(image.astype(np.int16) - target)
     return np.all(diff <= tolerance, axis=-1)
+
+
+def is_boundary_tile(pos: Position) -> bool:
+    x, y = pos
+    return (
+        x == 0
+        or x == ROOM_WIDTH_TILES - 1
+        or y == 0
+        or y == ROOM_HEIGHT_TILES - 1
+    )
 
 
 def clamp_tile(pos: Position) -> Position:

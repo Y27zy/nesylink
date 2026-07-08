@@ -21,6 +21,7 @@ state = extract_symbolic_state(obs, memory, inventory=inventory)
 - `state.walls: set[tuple[int, int]]`
 - `state.floors: set[tuple[int, int]]`
 - `state.chests: set[tuple[int, int]]`
+- `state.opened_chests: set[tuple[int, int]]`
 - `state.exits: set[tuple[int, int]]`
 - `state.monsters: set[tuple[int, int]]`
 
@@ -61,7 +62,7 @@ from vision_dynamic_resnet import extract_dynamic_objects
 result = extract_dynamic_objects(obs)
 ```
 
-如果存在 `models/dynamic_full_resnet.pt` 且安装了 PyTorch，则使用 Tiny ResNet 输出 `C x 8 x 10` heatmap。否则使用颜色连通域兜底。
+如果存在 `models/dynamic_pixel_resnet.pt` 且安装了 PyTorch，则使用像素级 heatmap 网络。否则使用颜色、形状和连通域规则兜底。
 
 动态类别：
 
@@ -76,6 +77,16 @@ player, monster_chaser, monster_patroller, monster_ambusher
 - 如果 `state.player is None`，说明视觉没有识别到玩家，controller 应该返回 `WAIT` 或使用 memory 中的上一帧位置。
 - `state.raw_features["static_vision_backend"]` 会显示当前使用 `"resnet"` 还是 `"rules"`，只用于调试和报告。
 - `state.raw_features["dynamic_vision_backend"]` 会显示当前使用 `"resnet"` 还是 `"components"`，只用于调试和报告。
+
+## 硬编码视觉评测
+
+开发阶段可以使用下面的命令，将像素识别结果与环境运行时真值进行离线对照：
+
+```bash
+python utils/evaluate_vision.py --random-steps 60 --seed 0
+```
+
+这个脚本会评测墙、宝箱、出口、按钮、开关、桥、缺口、陷阱、玩家和怪物。它可以读取隐藏运行时状态，但只允许用于开发、调试和报告，最终 `agent.py` 仍然只能从 pixels 和允许的 inventory 信息构造符号状态。
 
 ## 不允许的事
 

@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from nesylink.core.constants import (
     ACTION_A,
+    ACTION_DOWN,
+    ACTION_LEFT,
     ACTION_NOOP,
+    ACTION_RIGHT,
+    ACTION_UP,
+    MAP_HEIGHT_TILES,
+    MAP_WIDTH_TILES,
 )
 
 from planner import (
@@ -63,6 +69,16 @@ class Task2Controller:
             action = self._follow_or_plan(memory, path)
             if action is not None:
                 return action
+            if state.player in state.exits:
+                x, y = state.player
+                if x == 0:
+                    return ACTION_LEFT
+                if x == MAP_WIDTH_TILES - 1:
+                    return ACTION_RIGHT
+                if y == 0:
+                    return ACTION_UP
+                if y == MAP_HEIGHT_TILES - 1:
+                    return ACTION_DOWN
 
         memory.notes[TASK_PHASE_KEY] = "no_action"
         return ACTION_NOOP

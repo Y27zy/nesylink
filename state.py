@@ -18,6 +18,7 @@ class SymbolicState:
     walls: set[Position] = field(default_factory=set)
     floors: set[Position] = field(default_factory=set)
     chests: set[Position] = field(default_factory=set)
+    opened_chests: set[Position] = field(default_factory=set)
     exits: set[Position] = field(default_factory=set)
     monsters: set[Position] = field(default_factory=set)
     traps: set[Position] = field(default_factory=set)
@@ -48,4 +49,3 @@ class AgentMemory:
     bridge_state_hint: str | None = None
     planned_actions: list[int] = field(default_factory=list)
     notes: dict[str, Any] = field(default_factory=dict)
-

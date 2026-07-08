@@ -36,7 +36,7 @@ def is_safe_tile(state: SymbolicState, pos: Position) -> bool:
     if not in_bounds(pos):
         return False
     bridge_tiles = state.bridges
-    blocked = state.walls | state.monsters | state.chests
+    blocked = state.walls | state.monsters | state.chests | state.opened_chests
     blocked |= state.traps - bridge_tiles
     blocked |= state.gaps - bridge_tiles
     return pos not in blocked

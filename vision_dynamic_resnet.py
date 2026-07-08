@@ -4,7 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
-import torch
+
 import numpy as np
 
 from state import Position
@@ -191,6 +191,7 @@ class PixelHeatmapUNet:
                 )
                 self.dec_res2 = ResBlock(32)
                 self.head = nn.Conv2d(32, num_classes, 3, padding=1)
+                self.sigmoid = nn.Sigmoid()
 
             def forward(self, x):
                 e1 = self.enc_res1(self.enc1(x))
@@ -199,7 +200,7 @@ class PixelHeatmapUNet:
                 b = self.bottleneck(e3)
                 d1 = self.dec_res1(self.dec_up1(b))
                 d2 = self.dec_res2(self.dec_up2(d1))
-                return torch.sigmoid(self.head(d2))
+                return self.sigmoid(self.head(d2))
 
         return Model()
 
@@ -224,12 +225,17 @@ def detect_dynamic_components(obs: np.ndarray) -> DynamicVisionResult:
     for color in PLAYER_COLORS[:2]:
         player_mask |= color_mask(obs, color, tolerance=14)
 
-    player_component = largest_component(player_mask, min_pixels=10)
+    # The dark outline splits the tunic into several green islands. Join those
+    # islands so the component center follows the full moving sprite.
+    player_component = largest_component(
+        dilate_mask(player_mask, radius=2),
+        min_pixels=18,
+    )
     player: Position | None = None
     player_bbox: tuple[int, int, int, int] | None = None
     if player_component is not None:
         player_bbox = player_component
-        center = bbox_center(player_bbox)
+        center = player_center_from_component(obs, player_bbox)
         player = tile_from_center(center)
         objects.append(
             DynamicObject(
@@ -244,9 +250,12 @@ def detect_dynamic_components(obs: np.ndarray) -> DynamicVisionResult:
     monsters: set[Position] = set()
     for kind, body_color in MONSTER_COLORS.items():
         monster_mask = color_mask(obs, body_color, tolerance=18)
-        for bbox in connected_components(monster_mask, min_pixels=8):
+        for bbox in connected_components(
+            dilate_mask(monster_mask, radius=1),
+            min_pixels=12,
+        ):
             center = bbox_center(bbox)
-            tile = tile_from_center(center)
+            tile = monster_tile_from_body_center(kind, center)
             # Avoid treating player detail colors as monster components.
             if player is not None and manhattan(tile, player) <= 0:
                 continue
@@ -283,6 +292,16 @@ PLAYER_COLORS = (
     (240, 154, 52),
     (86, 42, 18),
 )
+
+MONSTER_CENTER_OFFSETS: dict[DynamicLabel, tuple[int, int]] = {
+    # Monster body colors occupy the upper part of each 16x16 sprite.
+    "monster_chaser": (0, 2),
+    "monster_patroller": (1, 2),
+    "monster_ambusher": (1, 2),
+    "player": (0, 0),
+}
+
+
 class TinyFullFrameResNet:
     """Tiny ResNet heatmap model without importing torch at module import time."""
 
@@ -333,29 +352,36 @@ def connected_components(mask: np.ndarray, *, min_pixels: int) -> list[tuple[int
     visited = np.zeros_like(mask, dtype=bool)
     boxes: list[tuple[int, int, int, int]] = []
 
-    for y in range(height):
-        for x in range(width):
-            if visited[y, x] or not mask[y, x]:
-                continue
-            queue: deque[tuple[int, int]] = deque([(x, y)])
-            visited[y, x] = True
-            xs: list[int] = []
-            ys: list[int] = []
+    seed_ys, seed_xs = np.nonzero(mask)
+    for seed_y, seed_x in zip(seed_ys.tolist(), seed_xs.tolist()):
+        if visited[seed_y, seed_x]:
+            continue
+        queue: deque[tuple[int, int]] = deque([(seed_x, seed_y)])
+        visited[seed_y, seed_x] = True
+        component_xs: list[int] = []
+        component_ys: list[int] = []
 
-            while queue:
-                cx, cy = queue.popleft()
-                xs.append(cx)
-                ys.append(cy)
-                for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
-                    if nx < 0 or nx >= width or ny < 0 or ny >= height:
-                        continue
-                    if visited[ny, nx] or not mask[ny, nx]:
-                        continue
-                    visited[ny, nx] = True
-                    queue.append((nx, ny))
+        while queue:
+            cx, cy = queue.popleft()
+            component_xs.append(cx)
+            component_ys.append(cy)
+            for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+                if nx < 0 or nx >= width or ny < 0 or ny >= height:
+                    continue
+                if visited[ny, nx] or not mask[ny, nx]:
+                    continue
+                visited[ny, nx] = True
+                queue.append((nx, ny))
 
-            if len(xs) >= min_pixels:
-                boxes.append((min(xs), min(ys), max(xs) + 1, max(ys) + 1))
+        if len(component_xs) >= min_pixels:
+            boxes.append(
+                (
+                    min(component_xs),
+                    min(component_ys),
+                    max(component_xs) + 1,
+                    max(component_ys) + 1,
+                )
+            )
 
     return boxes
 
@@ -376,6 +402,52 @@ def bbox_from_center(center: tuple[int, int], size: int = TILE_SIZE) -> tuple[in
     x, y = center
     half = size // 2
     return (x - half, y - half, x + half, y + half)
+
+
+def dilate_mask(mask: np.ndarray, *, radius: int) -> np.ndarray:
+    if radius <= 0:
+        return mask.copy()
+    height, width = mask.shape
+    padded = np.pad(mask, radius, mode="constant", constant_values=False)
+    dilated = np.zeros_like(mask, dtype=bool)
+    diameter = radius * 2 + 1
+    for dy in range(diameter):
+        for dx in range(diameter):
+            dilated |= padded[dy : dy + height, dx : dx + width]
+    return dilated
+
+
+def monster_tile_from_body_center(kind: DynamicLabel, center: tuple[int, int]) -> Position:
+    offset_x, offset_y = MONSTER_CENTER_OFFSETS.get(kind, (0, 0))
+    return tile_from_center((center[0] + offset_x, center[1] + offset_y))
+
+
+def player_center_from_component(
+    obs: np.ndarray,
+    bbox: tuple[int, int, int, int],
+) -> tuple[int, int]:
+    center_x, center_y = bbox_center(bbox)
+    left, top, right, bottom = bbox
+
+    # Green body pixels are centered one pixel above the entity center. A
+    # raised front shield covers the lower tunic, shortening the component by
+    # several pixels, so compensate for that recognizable shape as well.
+    center_y += 2 if bottom - top <= 12 else 1
+
+    # Left/right sprites have equally narrow green boxes. A single hair pixel
+    # identifies the right-facing sprite, whose body center is one pixel left
+    # of the entity center.
+    if right - left <= 11:
+        hair_mask = color_mask(obs, PLAYER_COLORS[3], tolerance=14)
+        y0 = max(0, top - 3)
+        y1 = min(obs.shape[0], bottom + 3)
+        x0 = max(0, left - 3)
+        x1 = min(obs.shape[1], right + 3)
+        local_y, local_x = np.nonzero(hair_mask[y0:y1, x0:x1])
+        if local_x.size and float(local_x.mean() + x0) > center_x:
+            center_x += 1
+
+    return center_x, center_y
 
 
 def tile_center_px(pos: Position) -> tuple[int, int]:
