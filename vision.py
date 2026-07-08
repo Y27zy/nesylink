@@ -6,6 +6,7 @@ import numpy as np
 
 from state import AgentMemory, SymbolicState
 from vision_dynamic_resnet import extract_dynamic_objects
+from vision_interactive import extract_interactive_tiles
 from vision_static_resnet import extract_static_tiles
 
 
@@ -54,6 +55,16 @@ def extract_symbolic_state(
         state.raw_features["dynamic_vision_backend"] = dynamic.backend
         state.raw_features["dynamic_objects"] = dynamic.objects
         state.raw_features["player_bbox"] = dynamic.player_bbox
+        interactive = extract_interactive_tiles(obs)
+        state.buttons = interactive.buttons
+        state.switches = interactive.switches
+        state.bridges = interactive.bridges
+        state.gaps = interactive.gaps
+        state.traps = interactive.traps
+        if state.player is not None:
+            state.buttons.discard(state.player)
+            state.switches.discard(state.player)
+        state.raw_features["interactive_vision_backend"] = interactive.backend
 
     return state
 
