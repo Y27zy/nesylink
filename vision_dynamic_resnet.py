@@ -4,7 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
-
+import torch
 import numpy as np
 
 from state import Position
@@ -14,7 +14,7 @@ from vision_static_resnet import ROOM_HEIGHT_TILES, ROOM_WIDTH_TILES, TILE_SIZE,
 DynamicLabel = Literal["player", "monster_chaser", "monster_patroller", "monster_ambusher"]
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_WEIGHTS_PATH = PROJECT_ROOT / "models" / "dynamic_full_resnet.pt"
+DEFAULT_WEIGHTS_PATH = PROJECT_ROOT / "models" / "dynamic_pixel_resnet.pt"
 
 DYNAMIC_LABELS: tuple[DynamicLabel, ...] = (
     "player",
@@ -25,19 +25,6 @@ DYNAMIC_LABELS: tuple[DynamicLabel, ...] = (
 
 DYNAMIC_CLASS_TO_INDEX = {label: index for index, label in enumerate(DYNAMIC_LABELS)}
 DYNAMIC_INDEX_TO_CLASS = {index: label for label, index in DYNAMIC_CLASS_TO_INDEX.items()}
-
-PLAYER_COLORS = (
-    (36, 198, 72),
-    (126, 248, 82),
-    (240, 154, 52),
-    (86, 42, 18),
-)
-
-MONSTER_COLORS: dict[DynamicLabel, tuple[int, int, int]] = {
-    "monster_chaser": (238, 126, 28),
-    "monster_patroller": (200, 78, 16),
-    "monster_ambusher": (255, 180, 48),
-}
 
 @dataclass(frozen=True)
 class DynamicObject:
@@ -86,7 +73,7 @@ class OptionalResNetDynamicDetector:
         except Exception:
             return
 
-        model = TinyFullFrameResNet(num_classes=len(DYNAMIC_LABELS), nn=nn)
+        model = PixelHeatmapUNet(num_classes=len(DYNAMIC_LABELS), nn=nn)
         payload = torch.load(self.weights_path, map_location="cpu")
         state_dict = payload.get("model_state_dict", payload) if isinstance(payload, dict) else payload
         model.load_state_dict(state_dict)
@@ -99,11 +86,12 @@ class OptionalResNetDynamicDetector:
         assert self.model is not None
         assert self.torch is not None
 
+        H, W = obs.shape[:2]  # 128, 160
+
         tensor = self.torch.from_numpy(obs.astype(np.float32) / 255.0)
         tensor = tensor.permute(2, 0, 1).unsqueeze(0)
         with self.torch.no_grad():
-            logits = self.model(tensor)[0]
-            probs = self.torch.sigmoid(logits)
+            heatmaps = self.model(tensor)[0]  # (C, 128, 160)，模型已含 sigmoid
 
         objects: list[DynamicObject] = []
         player: Position | None = None
@@ -111,16 +99,21 @@ class OptionalResNetDynamicDetector:
         monsters: set[Position] = set()
 
         for class_index, label in DYNAMIC_INDEX_TO_CLASS.items():
-            heatmap = probs[class_index]
-            flat_index = int(self.torch.argmax(heatmap).item())
-            confidence = float(heatmap.flatten()[flat_index].item())
+            hm = heatmaps[class_index]  # (128, 160)
+            flat_index = int(self.torch.argmax(hm).item())
+            confidence = float(hm.flatten()[flat_index].item())
             if confidence < 0.45:
                 continue
-            y = flat_index // ROOM_WIDTH_TILES
-            x = flat_index % ROOM_WIDTH_TILES
-            tile = (x, y)
-            center_px = tile_center_px(tile)
-            bbox = bbox_from_center(center_px)
+
+            # 像素级坐标（直接从 argmax 得到）
+            y = flat_index // W
+            x = flat_index % W
+            center_px = (x, y)
+
+            # 反算 tile 坐标（兼容现有 vision.py 接口）
+            tile = (x // TILE_SIZE, y // TILE_SIZE)
+            bbox = bbox_from_center(center_px, size=TILE_SIZE)
+
             obj = DynamicObject(label, tile, center_px, bbox, confidence)
             objects.append(obj)
             if label == "player":
@@ -138,50 +131,77 @@ class OptionalResNetDynamicDetector:
         )
 
 
-class TinyFullFrameResNet:
-    """Tiny ResNet heatmap model without importing torch at module import time."""
 
-    def __new__(cls, num_classes: int, nn: Any):  # noqa: D102
-        class ResidualBlock(nn.Module):
-            def __init__(self, channels: int) -> None:
+class PixelHeatmapUNet:
+
+    """Pixel-level encoder-decoder for C×128×160 heatmap regression."""
+
+    def __new__(cls, num_classes: int, nn: Any):
+        class ResBlock(nn.Module):
+            def __init__(self, channels: int):
                 super().__init__()
                 self.block = nn.Sequential(
-                    nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+                    nn.Conv2d(channels, channels, 3, padding=1, bias=False),
                     nn.BatchNorm2d(channels),
                     nn.ReLU(inplace=True),
-                    nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+                    nn.Conv2d(channels, channels, 3, padding=1, bias=False),
                     nn.BatchNorm2d(channels),
                 )
                 self.relu = nn.ReLU(inplace=True)
 
-            def forward(self, x):  # noqa: ANN001
+            def forward(self, x):
                 return self.relu(x + self.block(x))
 
         class Model(nn.Module):
-            def __init__(self) -> None:
+            def __init__(self):
                 super().__init__()
-                self.net = nn.Sequential(
-                    nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1, bias=False),
-                    nn.BatchNorm2d(32),
-                    nn.ReLU(inplace=True),
-                    ResidualBlock(32),
-                    nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
-                    nn.BatchNorm2d(64),
-                    nn.ReLU(inplace=True),
-                    ResidualBlock(64),
-                    nn.Conv2d(64, 96, kernel_size=3, stride=2, padding=1, bias=False),
-                    nn.BatchNorm2d(96),
-                    nn.ReLU(inplace=True),
-                    ResidualBlock(96),
-                    nn.AdaptiveAvgPool2d((ROOM_HEIGHT_TILES, ROOM_WIDTH_TILES)),
-                    nn.Conv2d(96, num_classes, kernel_size=1),
+                # Encoder
+                self.enc1 = nn.Sequential(
+                    nn.Conv2d(3, 32, 3, padding=1, bias=False),
+                    nn.BatchNorm2d(32), nn.ReLU(inplace=True),
                 )
+                self.enc_res1 = ResBlock(32)
+                self.enc_down1 = nn.Sequential(
+                    nn.Conv2d(32, 64, 3, stride=2, padding=1, bias=False),
+                    nn.BatchNorm2d(64), nn.ReLU(inplace=True),
+                )
+                self.enc_res2 = ResBlock(64)
+                self.enc_down2 = nn.Sequential(
+                    nn.Conv2d(64, 96, 3, stride=2, padding=1, bias=False),
+                    nn.BatchNorm2d(96), nn.ReLU(inplace=True),
+                )
+                self.enc_res3 = ResBlock(96)
+                # Bottleneck
+                self.bottleneck = nn.Sequential(
+                    nn.Conv2d(96, 128, 3, padding=1, bias=False),
+                    nn.BatchNorm2d(128), nn.ReLU(inplace=True),
+                    ResBlock(128),
+                )
+                # Decoder
+                self.dec_up1 = nn.Sequential(
+                    nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+                    nn.Conv2d(128, 64, 3, padding=1, bias=False),
+                    nn.BatchNorm2d(64), nn.ReLU(inplace=True),
+                )
+                self.dec_res1 = ResBlock(64)
+                self.dec_up2 = nn.Sequential(
+                    nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+                    nn.Conv2d(64, 32, 3, padding=1, bias=False),
+                    nn.BatchNorm2d(32), nn.ReLU(inplace=True),
+                )
+                self.dec_res2 = ResBlock(32)
+                self.head = nn.Conv2d(32, num_classes, 3, padding=1)
 
-            def forward(self, x):  # noqa: ANN001
-                return self.net(x)
+            def forward(self, x):
+                e1 = self.enc_res1(self.enc1(x))
+                e2 = self.enc_res2(self.enc_down1(e1))
+                e3 = self.enc_res3(self.enc_down2(e2))
+                b = self.bottleneck(e3)
+                d1 = self.dec_res1(self.dec_up1(b))
+                d2 = self.dec_res2(self.dec_up2(d1))
+                return torch.sigmoid(self.head(d2))
 
         return Model()
-
 
 _DETECTOR: OptionalResNetDynamicDetector | None = None
 
@@ -248,6 +268,64 @@ def detect_dynamic_components(obs: np.ndarray) -> DynamicVisionResult:
         objects=objects,
         backend="components",
     )
+
+
+
+##废弃部分
+MONSTER_COLORS: dict[DynamicLabel, tuple[int, int, int]] = {
+    "monster_chaser": (238, 126, 28),
+    "monster_patroller": (200, 78, 16),
+    "monster_ambusher": (255, 180, 48),
+}
+PLAYER_COLORS = (
+    (36, 198, 72),
+    (126, 248, 82),
+    (240, 154, 52),
+    (86, 42, 18),
+)
+class TinyFullFrameResNet:
+    """Tiny ResNet heatmap model without importing torch at module import time."""
+
+    def __new__(cls, num_classes: int, nn: Any):  # noqa: D102
+        class ResidualBlock(nn.Module):
+            def __init__(self, channels: int) -> None:
+                super().__init__()
+                self.block = nn.Sequential(
+                    nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+                    nn.BatchNorm2d(channels),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+                    nn.BatchNorm2d(channels),
+                )
+                self.relu = nn.ReLU(inplace=True)
+
+            def forward(self, x):  # noqa: ANN001
+                return self.relu(x + self.block(x))
+
+        class Model(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.net = nn.Sequential(
+                    nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1, bias=False),
+                    nn.BatchNorm2d(32),
+                    nn.ReLU(inplace=True),
+                    ResidualBlock(32),
+                    nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
+                    nn.BatchNorm2d(64),
+                    nn.ReLU(inplace=True),
+                    ResidualBlock(64),
+                    nn.Conv2d(64, 96, kernel_size=3, stride=2, padding=1, bias=False),
+                    nn.BatchNorm2d(96),
+                    nn.ReLU(inplace=True),
+                    ResidualBlock(96),
+                    nn.AdaptiveAvgPool2d((ROOM_HEIGHT_TILES, ROOM_WIDTH_TILES)),
+                    nn.Conv2d(96, num_classes, kernel_size=1),
+                )
+
+            def forward(self, x):  # noqa: ANN001
+                return self.net(x)
+
+        return Model()
 
 
 def connected_components(mask: np.ndarray, *, min_pixels: int) -> list[tuple[int, int, int, int]]:
