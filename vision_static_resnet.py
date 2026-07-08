@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 
 from state import Position
 
 
-TileLabel = Literal["floor", "wall", "chest", "exit", "unknown"]
+TileLabel = str
 
 TILE_SIZE = 16
 ROOM_WIDTH_TILES = 10
@@ -18,16 +18,34 @@ ROOM_HEIGHT_TILES = 8
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_WEIGHTS_PATH = PROJECT_ROOT / "models" / "static_tile_resnet.pt"
 
-STATIC_LABELS: tuple[TileLabel, ...] = (
+LABEL_NAMES: tuple[TileLabel, ...] = (
     "floor",
     "wall",
-    "chest",
-    "exit",
-    "unknown",
+    "chest_key",
+    "chest_gold",
+    "chest_heal",
+    "chest_item",
+    "trap_spike",
+    "trap_abyss",
+    "npc",
+    "gap",
+    "bridge",
+    "button",
+    "switch",
+    "exit_normal",
+    "exit_locked_key",
+    "exit_conditional",
+    "monster_chaser",
+    "monster_patroller",
+    "monster_ambusher",
+    "player",
 )
 
+STATIC_LABELS = LABEL_NAMES
 STATIC_CLASS_TO_INDEX = {label: index for index, label in enumerate(STATIC_LABELS)}
 STATIC_INDEX_TO_CLASS = {index: label for label, index in STATIC_CLASS_TO_INDEX.items()}
+LABEL_TO_INDEX = STATIC_CLASS_TO_INDEX
+INDEX_TO_LABEL = STATIC_INDEX_TO_CLASS
 
 
 PALETTE: dict[str, tuple[int, int, int]] = {
@@ -50,6 +68,8 @@ PALETTE: dict[str, tuple[int, int, int]] = {
     "chest_inner": (42, 18, 16),
     "door_wood": (96, 48, 26),
     "exit_glow": (255, 244, 112),
+    "coin": (210, 28, 96),
+    "heart": (204, 16, 72),
 }
 
 
@@ -60,7 +80,10 @@ class StaticVisionResult:
     chests: set[Position]
     opened_chests: set[Position]
     exits: set[Position]
+    chest_types: dict[Position, TileLabel]
+    exit_types: dict[Position, TileLabel]
     labels: dict[Position, TileLabel]
+    label_ids: dict[Position, int]
     confidences: dict[Position, float]
     backend: str
 
@@ -101,14 +124,19 @@ class OptionalResNetTileClassifier:
         except Exception:
             return
 
-        model = TinyResNet(num_classes=len(STATIC_LABELS), nn=nn)
-        payload = torch.load(self.weights_path, map_location="cpu")
-        state_dict = payload.get("model_state_dict", payload) if isinstance(payload, dict) else payload
-        model.load_state_dict(state_dict)
-        model.eval()
-        self.model = model
-        self.torch = torch
-        self.backend = "resnet"
+        try:
+            model = TinyResNet(num_classes=len(STATIC_LABELS), nn=nn)
+            payload = torch.load(self.weights_path, map_location="cpu")
+            state_dict = payload.get("model_state_dict", payload) if isinstance(payload, dict) else payload
+            model.load_state_dict(state_dict)
+            model.eval()
+            self.model = model
+            self.torch = torch
+            self.backend = "resnet"
+        except Exception:
+            self.model = None
+            self.torch = None
+            self.backend = "rules"
 
     def _classify_with_resnet(self, tile: np.ndarray) -> tuple[TileLabel, float]:
         assert self.model is not None
@@ -186,12 +214,15 @@ def extract_static_tiles(obs: np.ndarray) -> StaticVisionResult:
 
     classifier = get_static_classifier()
     labels: dict[Position, TileLabel] = {}
+    label_ids: dict[Position, int] = {}
     confidences: dict[Position, float] = {}
     walls: set[Position] = set()
     floors: set[Position] = set()
     chests: set[Position] = set()
     opened_chests: set[Position] = set()
     exits: set[Position] = set()
+    chest_types: dict[Position, TileLabel] = {}
+    exit_types: dict[Position, TileLabel] = {}
     for y in range(ROOM_HEIGHT_TILES):
         for x in range(ROOM_WIDTH_TILES):
             pos = (x, y)
@@ -200,23 +231,29 @@ def extract_static_tiles(obs: np.ndarray) -> StaticVisionResult:
                 x * TILE_SIZE : (x + 1) * TILE_SIZE,
             ]
             if is_open_chest_tile(tile):
-                labels[pos] = "unknown"
+                label = classify_chest_type(tile)
+                labels[pos] = label
+                label_ids[pos] = LABEL_TO_INDEX[label]
                 confidences[pos] = 1.0
                 opened_chests.add(pos)
+                chest_types[pos] = label
                 continue
             label, confidence = classifier.classify(
                 tile,
                 allow_exit=is_boundary_tile(pos),
             )
             labels[pos] = label
+            label_ids[pos] = LABEL_TO_INDEX.get(label, LABEL_TO_INDEX["floor"])
             confidences[pos] = confidence
 
             if label == "wall":
                 walls.add(pos)
-            elif label == "chest":
+            elif is_chest_label(label):
                 chests.add(pos)
-            elif label == "exit":
+                chest_types[pos] = label
+            elif is_exit_label(label):
                 exits.add(pos)
+                exit_types[pos] = label
                 floors.add(pos)
             elif label == "floor":
                 floors.add(pos)
@@ -233,7 +270,10 @@ def extract_static_tiles(obs: np.ndarray) -> StaticVisionResult:
         chests=chests,
         opened_chests=opened_chests,
         exits=exits,
+        chest_types=chest_types,
+        exit_types=exit_types,
         labels=labels,
+        label_ids=label_ids,
         confidences=confidences,
         backend=classifier.backend,
     )
@@ -281,30 +321,58 @@ def classify_static_tile_rules(
     )
     has_closed_chest = counts["chest_wood"] > 25 and closed_chest_band > 18
     if has_closed_chest:
-        return "chest", min(1.0, chest_score * 5)
+        return classify_chest_type(tile), min(1.0, chest_score * 5)
 
     if allow_exit:
         # Exits always occupy boundary tiles. This prevents bridge planks and
         # chest bands from being mistaken for doors.
+        locked_exit = counts["door_wood"] > 25 and counts["outline"] > 20
+        conditional_exit = (
+            counts["exit_glow"] > 12
+            and counts["outline"] > 30
+            and counts["chest_band"] > 20
+            and counts["chest_wood"] < 10
+        )
         normal_exit = (
             counts["exit_glow"] > 12
             and counts["shadow"] > 15
             and counts["outline"] > 20
         )
-        conditional_exit = (
-            counts["exit_glow"] > 12
-            and counts["outline"] > 30
-            and counts["chest_band"] > 10
-            and counts["chest_wood"] < 10
-        )
-        locked_exit = counts["door_wood"] > 25 and counts["outline"] > 20
-        if locked_exit or normal_exit or conditional_exit:
-            return "exit", min(1.0, exit_score * 4)
+        if locked_exit:
+            return "exit_locked_key", min(1.0, exit_score * 4)
+        if conditional_exit:
+            return "exit_conditional", min(1.0, exit_score * 4)
+        if normal_exit:
+            return "exit_normal", min(1.0, exit_score * 4)
 
     if floor_score > 0.25:
         return "floor", min(1.0, floor_score * 3)
 
-    return "unknown", 0.0
+    return "floor", 0.0
+
+
+def is_chest_label(label: TileLabel) -> bool:
+    return label in {"chest_key", "chest_gold", "chest_heal", "chest_item"}
+
+
+def is_exit_label(label: TileLabel) -> bool:
+    return label in {"exit_normal", "exit_locked_key", "exit_conditional"}
+
+
+def classify_chest_type(tile: np.ndarray) -> TileLabel:
+    coin = count_near_color(tile, PALETTE["coin"], tolerance=12)
+    heart = count_near_color(tile, PALETTE["heart"], tolerance=12)
+    if coin >= 8 and coin >= heart:
+        return "chest_gold"
+    if heart >= 8:
+        return "chest_heal"
+
+    # Key icons add yellow pixels beyond the normal chest band at the far
+    # right edge. Item chests currently render without a separate loot icon.
+    key_extension = count_near_color(tile[5:6, 14:16], PALETTE["chest_band"], tolerance=12)
+    if key_extension >= 2:
+        return "chest_key"
+    return "chest_item"
 
 
 def count_near_color(tile: np.ndarray, color: tuple[int, int, int], *, tolerance: int) -> int:

@@ -47,8 +47,11 @@ def extract_symbolic_state(
         state.chests = static.chests
         state.opened_chests = static.opened_chests
         state.exits = static.exits
+        state.chest_types = static.chest_types
+        state.exit_types = static.exit_types
         state.raw_features["static_vision_backend"] = static.backend
         state.raw_features["static_labels"] = static.labels
+        state.raw_features["static_label_ids"] = static.label_ids
         state.raw_features["static_confidences"] = static.confidences
         dynamic = extract_dynamic_objects(obs)
         state.player = dynamic.player

@@ -20,6 +20,8 @@ class SymbolicState:
     chests: set[Position] = field(default_factory=set)
     opened_chests: set[Position] = field(default_factory=set)
     exits: set[Position] = field(default_factory=set)
+    chest_types: dict[Position, str] = field(default_factory=dict)
+    exit_types: dict[Position, str] = field(default_factory=dict)
     monsters: set[Position] = field(default_factory=set)
     traps: set[Position] = field(default_factory=set)
     buttons: set[Position] = field(default_factory=set)
