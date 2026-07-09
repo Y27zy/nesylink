@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Iterable
+from collections.abc import Callable
+from typing import Iterable, TypeVar
 
 from nesylink.core.constants import (
     ACTION_DOWN,
@@ -17,6 +18,7 @@ from state import Position, SymbolicState
 
 
 MOVE_ACTIONS = (ACTION_UP, ACTION_DOWN, ACTION_LEFT, ACTION_RIGHT)
+Node = TypeVar("Node")
 
 
 def in_bounds(pos: Position) -> bool:
@@ -39,6 +41,9 @@ def is_safe_tile(state: SymbolicState, pos: Position) -> bool:
     blocked = state.walls | state.monsters | state.chests | state.opened_chests
     blocked |= state.traps - bridge_tiles
     blocked |= state.gaps - bridge_tiles
+    static_labels = state.raw_features.get("static_labels", {})
+    if isinstance(static_labels, dict) and static_labels.get(pos) == "npc":
+        return False
     return pos not in blocked
 
 
@@ -105,3 +110,28 @@ def actions_for_tile_path(path: list[Position]) -> list[int]:
         action = action_from_step(current, nxt)
         actions.extend([action] * TILE_SIZE)
     return actions
+
+
+def bfs_graph_path(
+    graph: dict[Node, dict[str, Node]],
+    start: Node,
+    is_goal: Callable[[Node], bool],
+) -> list[Node] | None:
+    """Return the shortest node path to a goal in a discovered room graph."""
+
+    queue: deque[Node] = deque([start])
+    parent: dict[Node, Node | None] = {start: None}
+    while queue:
+        node = queue.popleft()
+        if is_goal(node):
+            path: list[Node] = []
+            cursor: Node | None = node
+            while cursor is not None:
+                path.append(cursor)
+                cursor = parent[cursor]
+            return list(reversed(path))
+        for neighbor in graph.get(node, {}).values():
+            if neighbor not in parent:
+                parent[neighbor] = node
+                queue.append(neighbor)
+    return None

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 
 from nesylink.core.constants import (
     ACTION_A,
+    ACTION_B,
     ACTION_DOWN,
     ACTION_LEFT,
     ACTION_NOOP,
@@ -13,375 +15,631 @@ from nesylink.core.constants import (
     MAP_WIDTH_TILES,
 )
 
-from planner import actions_for_tile_path, bfs_path, bfs_path_to_adjacent_target
+from planner import (
+    actions_for_tile_path,
+    bfs_graph_path,
+    bfs_path,
+    bfs_path_to_adjacent_target,
+)
 from state import AgentMemory, Position, SymbolicState
 
-W, H = MAP_WIDTH_TILES, MAP_HEIGHT_TILES
-BRIDGE_STATES = ("west_to_north", "west_to_east", "west_to_south")
-BRIDGE_TILES: dict[str, set[Position]] = {
-    "west_to_north": {
-        (0, 3), (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
-        (0, 4), (1, 4), (2, 4), (3, 4), (4, 4), (5, 4),
-        (4, 0), (5, 0), (4, 1), (5, 1), (4, 2), (5, 2),
-    },
-    "west_to_east": {(x, y) for y in (3, 4) for x in range(W)},
-    "west_to_south": {
-        (0, 3), (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
-        (0, 4), (1, 4), (2, 4), (3, 4), (4, 4), (5, 4),
-        (4, 5), (5, 5), (4, 6), (5, 6), (4, 7), (5, 7),
-    },
+
+DIRECTIONS = ("north", "east", "south", "west")
+OPPOSITE = {
+    "north": "south",
+    "south": "north",
+    "east": "west",
+    "west": "east",
 }
-SWITCH = {(4, 4)}
-GUARDIAN = (4, 4)
-EXITS = {
-    "west": {(0, 3), (0, 4)},
-    "east": {(W - 1, 3), (W - 1, 4)},
-    "north": {(3, 0), (4, 0), (5, 0)},
-    "south": {(3, 7), (4, 7), (5, 7)},
-}
-CROSS = {
-    "west": ACTION_LEFT,
-    "east": ACTION_RIGHT,
+CROSS_ACTION = {
     "north": ACTION_UP,
     "south": ACTION_DOWN,
+    "east": ACTION_RIGHT,
+    "west": ACTION_LEFT,
 }
+
+
+def adjacent_target(player: Position | None, targets: set[Position]) -> Position | None:
+    if player is None:
+        return None
+    px, py = player
+    for target in sorted(targets):
+        tx, ty = target
+        if abs(px - tx) + abs(py - ty) == 1:
+            return target
+    return None
+
+
+def face_target(player: Position, target: Position) -> int:
+    px, py = player
+    tx, ty = target
+    if tx == px - 1:
+        return ACTION_LEFT
+    if tx == px + 1:
+        return ACTION_RIGHT
+    if ty == py - 1:
+        return ACTION_UP
+    if ty == py + 1:
+        return ACTION_DOWN
+    return ACTION_A
+
+
+class RoomExplorer:
+    """Room-graph search backed by the existing AgentMemory.notes field."""
+
+    def _graph(self, memory: AgentMemory) -> dict[str, dict[str, str]]:
+        return memory.notes.setdefault("search_graph", {})
+
+    def _rooms(self, memory: AgentMemory) -> dict[str, dict]:
+        return memory.notes.setdefault("search_rooms", {})
+
+    def _tried(self, memory: AgentMemory) -> set[tuple[str, str]]:
+        return memory.notes.setdefault("search_tried", set())
+
+    def _blocked(self, memory: AgentMemory) -> dict[tuple[str, str], tuple]:
+        return memory.notes.setdefault("search_blocked", {})
+
+    def _new_room(self, memory: AgentMemory) -> str:
+        counter = int(memory.notes.get("search_room_counter", 0))
+        memory.notes["search_room_counter"] = counter + 1
+        room = f"room_{counter}"
+        self._graph(memory).setdefault(room, {})
+        self._rooms(memory).setdefault(
+            room,
+            {
+                "exits": {},
+                "switches": set(),
+                "bridge_signatures": set(),
+                "monsters_seen": False,
+            },
+        )
+        return room
+
+    def _resource_signature(self, state: SymbolicState, memory: AgentMemory) -> tuple:
+        return (
+            state.keys,
+            tuple(sorted(state.items)),
+            tuple(sorted(state.tools)),
+            len(memory.button_history),
+            int(memory.notes.get("switch_activations", 0)),
+        )
+
+    def _room_signature(self, state: SymbolicState) -> tuple:
+        directions = tuple(sorted(self._visible_exits(state)))
+        return (
+            tuple(sorted(state.walls)),
+            directions,
+        )
+
+    def _visible_exits(self, state: SymbolicState) -> dict[str, set[Position]]:
+        result: dict[str, set[Position]] = {}
+        for x, y in state.exits | state.bridges:
+            direction = None
+            if y == 0:
+                direction = "north"
+            elif x == MAP_WIDTH_TILES - 1:
+                direction = "east"
+            elif y == MAP_HEIGHT_TILES - 1:
+                direction = "south"
+            elif x == 0:
+                direction = "west"
+            if direction is not None:
+                result.setdefault(direction, set()).add((x, y))
+        return result
+
+    def update(self, state: SymbolicState, memory: AgentMemory) -> str:
+        self._learn_blocked_tile(state, memory)
+        pending = memory.notes.get("search_pending")
+        if isinstance(pending, dict):
+            self._resolve_pending(state, memory, pending)
+        else:
+            self._resolve_implicit_transition(state, memory)
+
+        if memory.current_room_key is None:
+            memory.current_room_key = self._new_room(memory)
+        room = memory.current_room_key
+        record = self._rooms(memory).setdefault(
+            room,
+            {
+                "exits": {},
+                "switches": set(),
+                "bridge_signatures": set(),
+                "monsters_seen": False,
+            },
+        )
+        for direction, tiles in self._visible_exits(state).items():
+            record["exits"].setdefault(direction, set()).update(tiles)
+        record["switches"].update(state.switches)
+        record["monsters_seen"] = record["monsters_seen"] or bool(state.monsters)
+        if state.bridges:
+            record["bridge_signatures"].add(tuple(sorted(state.bridges)))
+        memory.visited_rooms.add(room)
+        memory.notes["search_last_signature"] = self._room_signature(state)
+        return room
+
+    def _learn_blocked_tile(
+        self,
+        state: SymbolicState,
+        memory: AgentMemory,
+    ) -> None:
+        player = state.player
+        previous = memory.notes.get("search_last_player")
+        action = memory.notes.get("search_last_move")
+        if player is None:
+            return
+        if player == previous and action in {
+            ACTION_UP,
+            ACTION_DOWN,
+            ACTION_LEFT,
+            ACTION_RIGHT,
+        }:
+            count = int(memory.notes.get("search_stagnant_steps", 0)) + 1
+        else:
+            count = 0
+        memory.notes["search_stagnant_steps"] = count
+        memory.notes["search_last_player"] = player
+        if count < 24 or memory.current_room_key is None:
+            return
+        dx, dy = {
+            ACTION_UP: (0, -1),
+            ACTION_DOWN: (0, 1),
+            ACTION_LEFT: (-1, 0),
+            ACTION_RIGHT: (1, 0),
+        }[action]
+        blocked = memory.notes.setdefault("search_learned_blocked", {})
+        blocked.setdefault(memory.current_room_key, set()).add(
+            (player[0] + dx, player[1] + dy)
+        )
+        memory.planned_actions.clear()
+        memory.notes["search_stagnant_steps"] = 0
+
+    def _planning_state(
+        self,
+        state: SymbolicState,
+        memory: AgentMemory,
+        *,
+        avoid_monsters: bool,
+    ) -> SymbolicState:
+        result = self._avoid_monsters(state) if avoid_monsters else state
+        learned = memory.notes.get("search_learned_blocked", {}).get(
+            memory.current_room_key, set()
+        )
+        if learned:
+            result = replace(result, walls=result.walls | set(learned))
+        return result
+
+    def _link_transition(
+        self,
+        memory: AgentMemory,
+        source: str,
+        direction: str,
+    ) -> None:
+        graph = self._graph(memory)
+        destination = graph.setdefault(source, {}).get(direction)
+        discovered_now = destination is None
+        if destination is None:
+            destination = self._new_room(memory)
+            graph[source][direction] = destination
+        graph.setdefault(destination, {})[OPPOSITE[direction]] = source
+        self._blocked(memory).pop((source, direction), None)
+        self._tried(memory).add((source, direction))
+        memory.current_room_key = destination
+        if (
+            self._rooms(memory).get(destination, {}).get("monsters_seen")
+            and memory.step_count >= 850
+        ):
+            memory.notes["search_arrival_guard"] = 4
+        elif discovered_now and memory.step_count >= 850:
+            memory.notes["search_arrival_guard"] = 8
+            memory.notes["search_new_room_danger"] = True
+        memory.planned_actions.clear()
+
+    def _resolve_implicit_transition(
+        self,
+        state: SymbolicState,
+        memory: AgentMemory,
+    ) -> None:
+        source = memory.current_room_key
+        kind = str(memory.notes.get("search_plan_kind", ""))
+        previous = memory.notes.get("search_last_signature")
+        if (
+            source is None
+            or not kind.startswith("exit:")
+            or previous is None
+            or previous == self._room_signature(state)
+        ):
+            return
+        direction = kind.split(":", 1)[1]
+        if direction in OPPOSITE:
+            self._link_transition(memory, source, direction)
+
+    def _resolve_pending(
+        self,
+        state: SymbolicState,
+        memory: AgentMemory,
+        pending: dict,
+    ) -> None:
+        if state.player is None:
+            return
+        source = str(pending["room"])
+        direction = str(pending["direction"])
+        targets = {tuple(pos) for pos in pending["targets"]}
+        if state.player in targets:
+            remaining = int(pending.get("remaining", 0))
+            if remaining > 0:
+                pending["remaining"] = remaining - 1
+                memory.notes["search_pending"] = pending
+                return
+            memory.notes.pop("search_pending", None)
+            memory.planned_actions.clear()
+            self._blocked(memory)[(source, direction)] = tuple(pending["resources"])
+            memory.current_room_key = source
+            return
+        memory.notes.pop("search_pending", None)
+        memory.planned_actions.clear()
+        self._link_transition(memory, source, direction)
+
+    def _can_try(
+        self,
+        state: SymbolicState,
+        memory: AgentMemory,
+        room: str,
+        direction: str,
+    ) -> bool:
+        old = self._blocked(memory).get((room, direction))
+        return old is None or old != self._resource_signature(state, memory)
+
+    def _frontier(
+        self,
+        state: SymbolicState,
+        memory: AgentMemory,
+        room: str,
+    ) -> list[str]:
+        exits = self._rooms(memory).get(room, {}).get("exits", {})
+        return [
+            direction
+            for direction in DIRECTIONS
+            if direction in exits
+            and direction not in self._graph(memory).get(room, {})
+            and (room, direction) not in self._tried(memory)
+            and self._can_try(state, memory, room, direction)
+        ]
+
+    def route(
+        self,
+        memory: AgentMemory,
+        predicate: Callable[[str], bool],
+    ) -> list[str] | None:
+        start = memory.current_room_key
+        if start is None:
+            return None
+        return bfs_graph_path(self._graph(memory), start, predicate)
+
+    def direction_toward(
+        self,
+        memory: AgentMemory,
+        predicate: Callable[[str], bool],
+    ) -> str | None:
+        path = self.route(memory, predicate)
+        if path is None or len(path) < 2 or memory.current_room_key is None:
+            return None
+        for direction, neighbor in self._graph(memory)[memory.current_room_key].items():
+            if neighbor == path[1]:
+                return direction
+        return None
+
+    def direction_to_frontier(
+        self,
+        state: SymbolicState,
+        memory: AgentMemory,
+        *,
+        avoid_monsters: bool = False,
+        resource_priority: bool = False,
+    ) -> str | None:
+        room = memory.current_room_key
+        if room is None:
+            return None
+        local = self._frontier(state, memory, room)
+        if local:
+            planning_state = self._planning_state(
+                state, memory, avoid_monsters=avoid_monsters
+            )
+            ranked: list[tuple[int, int, str]] = []
+            for direction in local:
+                targets = set(self._visible_exits(state).get(direction, set()))
+                targets.update(
+                    self._rooms(memory)[room]["exits"].get(direction, set())
+                )
+                path = bfs_path(planning_state, targets)
+                if path is not None:
+                    priority = 0
+                    if resource_priority:
+                        labels = {
+                            state.exit_types.get(target, "exit_normal")
+                            for target in targets
+                        }
+                        if "exit_locked_key" in labels:
+                            priority = 0 if state.keys > 0 else 4
+                        elif "exit_conditional" in labels:
+                            priority = 0 if memory.button_history else 3
+                        else:
+                            priority = 2
+                    ranked.append((priority, len(path), direction))
+            if ranked:
+                return min(ranked)[2]
+        return self.direction_toward(
+            memory,
+            lambda candidate: bool(self._frontier(state, memory, candidate)),
+        )
+
+    def retry_direction(
+        self,
+        state: SymbolicState,
+        memory: AgentMemory,
+        room: str,
+    ) -> str | None:
+        for edge_room, direction in self._blocked(memory):
+            if (
+                edge_room == room
+                and direction not in self._graph(memory).get(room, {})
+                and self._can_try(state, memory, room, direction)
+            ):
+                self._tried(memory).discard((room, direction))
+                return direction
+        return None
+
+    def direction_to_retry(
+        self,
+        state: SymbolicState,
+        memory: AgentMemory,
+    ) -> str | None:
+        return self.direction_toward(
+            memory,
+            lambda room: any(
+                edge_room == room
+                and self._can_try(state, memory, edge_room, direction)
+                for edge_room, direction in self._blocked(memory)
+            ),
+        )
+
+    def move_to_exit(
+        self,
+        state: SymbolicState,
+        memory: AgentMemory,
+        direction: str,
+        *,
+        avoid_monsters: bool = False,
+        shield_before_danger: bool = False,
+        shield_through_monsters: bool = False,
+    ) -> int:
+        room = memory.current_room_key
+        if room is None or state.player is None:
+            return ACTION_NOOP
+        visible = self._visible_exits(state).get(direction, set())
+        remembered = self._rooms(memory)[room]["exits"].get(direction, set())
+        targets = set(visible) | set(remembered)
+        if not targets:
+            return ACTION_NOOP
+        if state.player in targets:
+            self._tried(memory).add((room, direction))
+            destination = self._graph(memory).get(room, {}).get(direction)
+            dangerous = bool(
+                destination
+                and self._rooms(memory).get(destination, {}).get("monsters_seen")
+            )
+            shield_actions = (
+                [ACTION_B] if shield_before_danger and dangerous else []
+            )
+            crossing_actions = shield_actions + [CROSS_ACTION[direction]] * 16
+            memory.notes["search_pending"] = {
+                "room": room,
+                "direction": direction,
+                "targets": tuple(sorted(targets)),
+                "resources": self._resource_signature(state, memory),
+                "remaining": len(crossing_actions) - 1,
+            }
+            memory.planned_actions = crossing_actions
+            return memory.planned_actions.pop(0)
+        planning_state = self._planning_state(
+            state, memory, avoid_monsters=avoid_monsters
+        )
+        other_exits: set[Position] = set()
+        for other_direction, tiles in self._rooms(memory)[room]["exits"].items():
+            if other_direction != direction:
+                other_exits.update(tiles)
+        planning_state = replace(
+            planning_state,
+            walls=planning_state.walls | other_exits,
+        )
+        path = bfs_path(planning_state, targets)
+        if path is None and shield_through_monsters and state.monsters:
+            path = bfs_path(replace(planning_state, monsters=set()), targets)
+            if path is not None and len(path) >= 2:
+                memory.planned_actions = [ACTION_B] + actions_for_tile_path(path[:2])
+                memory.notes["search_plan_kind"] = f"exit:{direction}"
+                memory.notes["search_plan_targets"] = tuple(sorted(targets))
+                memory.notes["search_plan_room"] = memory.current_room_key
+                return memory.planned_actions.pop(0)
+        return self.follow(memory, path, f"exit:{direction}", targets)
+
+    def follow(
+        self,
+        memory: AgentMemory,
+        path: list[Position] | None,
+        kind: str,
+        targets: set[Position],
+    ) -> int:
+        if path is None or len(path) < 2:
+            return ACTION_NOOP
+        memory.planned_actions = actions_for_tile_path(path[:2])
+        memory.notes["search_plan_kind"] = kind
+        memory.notes["search_plan_targets"] = tuple(sorted(targets))
+        memory.notes["search_plan_room"] = memory.current_room_key
+        action = memory.planned_actions.pop(0)
+        memory.notes["search_last_move"] = action
+        return action
+
+    def interact(
+        self,
+        state: SymbolicState,
+        memory: AgentMemory,
+        targets: set[Position],
+        kind: str,
+        *,
+        avoid_monsters: bool = False,
+        shield_through_monsters: bool = False,
+    ) -> int:
+        if adjacent_target(state.player, targets) is not None:
+            memory.planned_actions.clear()
+            return ACTION_A
+        planning_state = self._planning_state(
+            state, memory, avoid_monsters=avoid_monsters
+        )
+        path = bfs_path_to_adjacent_target(planning_state, targets)
+        if path is None and shield_through_monsters and state.monsters:
+            path = bfs_path_to_adjacent_target(
+                replace(planning_state, monsters=set()), targets
+            )
+            if path is not None and len(path) >= 2:
+                memory.planned_actions = [ACTION_B] + actions_for_tile_path(path[:2])
+                memory.notes["search_plan_kind"] = kind
+                memory.notes["search_plan_targets"] = tuple(sorted(targets))
+                memory.notes["search_plan_room"] = memory.current_room_key
+                return memory.planned_actions.pop(0)
+        return self.follow(memory, path, kind, targets)
+
+    def _avoid_monsters(self, state: SymbolicState) -> SymbolicState:
+        danger: set[Position] = set()
+        for mx, my in state.monsters:
+            for dx in range(-1, 2):
+                for dy in range(-1, 2):
+                    if abs(dx) + abs(dy) <= 1:
+                        danger.add((mx + dx, my + dy))
+        danger.discard(state.player)
+        return replace(state, walls=state.walls | danger)
+
+    def attack(self, state: SymbolicState, memory: AgentMemory) -> int:
+        target = adjacent_target(state.player, state.monsters)
+        if target is not None and state.player is not None:
+            memory.planned_actions = [ACTION_A]
+            memory.notes["search_plan_kind"] = "attack"
+            memory.notes["search_plan_room"] = memory.current_room_key
+            return face_target(state.player, target)
+        if state.player is not None and state.monsters:
+            px, py = state.player
+            nearest = min(
+                state.monsters,
+                key=lambda pos: abs(px - pos[0]) + abs(py - pos[1]),
+            )
+            distance = abs(px - nearest[0]) + abs(py - nearest[1])
+            if distance <= 3:
+                dx, dy = nearest[0] - px, nearest[1] - py
+                if abs(dx) >= abs(dy) and dx:
+                    advance = ACTION_RIGHT if dx > 0 else ACTION_LEFT
+                else:
+                    advance = ACTION_DOWN if dy > 0 else ACTION_UP
+                memory.planned_actions = [advance] * 8 + [ACTION_A] * 8
+                memory.notes["search_plan_kind"] = "attack"
+                memory.notes["search_plan_room"] = memory.current_room_key
+                return memory.planned_actions.pop(0)
+        return self.follow(
+            memory,
+            bfs_path_to_adjacent_target(state, state.monsters),
+            "monster",
+            set(state.monsters),
+        )
+
+    def clear_stale_plan(self, state: SymbolicState, memory: AgentMemory) -> None:
+        if memory.notes.get("search_plan_room") != memory.current_room_key:
+            memory.planned_actions.clear()
+        kind = str(memory.notes.get("search_plan_kind", ""))
+        planned = memory.notes.get("search_plan_targets")
+        current = None
+        if kind == "chest":
+            current = tuple(sorted(state.chests - state.opened_chests))
+        elif kind == "monster":
+            current = tuple(sorted(state.monsters))
+        elif kind == "button":
+            current = tuple(sorted(state.buttons))
+            if planned and not current:
+                memory.button_history.update(planned)
+        elif kind == "switch":
+            current = tuple(sorted(state.switches))
+        if current is not None and planned is not None and current != planned:
+            memory.planned_actions.clear()
+
+    def room_has_switch(self, memory: AgentMemory, room: str) -> bool:
+        return bool(self._rooms(memory).get(room, {}).get("switches"))
+
+    def room_has_bridge(self, memory: AgentMemory, room: str) -> bool:
+        return bool(self._rooms(memory).get(room, {}).get("bridge_signatures"))
+
+    def clear_exit_attempts(self, memory: AgentMemory) -> None:
+        self._tried(memory).clear()
 
 
 class Task4Controller:
+    """Search each bridge configuration instead of assuming fixed rooms."""
+
+    def __init__(self) -> None:
+        self.explorer = RoomExplorer()
+
     def reset(self, seed: int | None = None, task_id: str | None = None) -> None:
         del seed, task_id
 
-    def _sig(self, targets: set[Position]) -> tuple[Position, ...]:
-        return tuple(sorted(targets))
-
-    def _dirs(self, state: SymbolicState) -> dict[str, bool]:
-        ex = state.exits
-        return {
-            "w": any(x == 0 for x, _ in ex),
-            "e": any(x == W - 1 for x, _ in ex),
-            "n": any(y == 0 for _, y in ex),
-            "s": any(y == H - 1 for _, y in ex),
-        }
-
-    def _room(self, state: SymbolicState) -> str:
-        d = self._dirs(state)
-        if d["w"] and d["e"] and d["n"] and d["s"]:
-            return "center"
-        if sum(d.values()) >= 3 or len(state.bridges) >= 6 or len(state.gaps) >= 20:
-            return "center"
-        if d["e"] and not d["w"]:
-            return "west"
-        if d["s"] and not d["w"]:
-            return "north"
-        if d["w"] and not d["e"]:
-            return "east"
-        if d["n"]:
-            return "south"
-        if state.switches:
-            return "west"
-        return "unknown"
-
-    def _bridge(self, memory: AgentMemory) -> str:
-        return str(memory.notes.get("t4bridge", "west_to_north"))
-
-    def _want_bridge(self, state: SymbolicState, memory: AgentMemory) -> str:
-        if memory.notes.get("t4guard"):
-            return "west_to_north"
-        if self._sword(state):
-            return "west_to_south"
-        if state.keys > 0:
-            return "west_to_east"
-        return "west_to_north"
-
-    def _sword(self, state: SymbolicState) -> bool:
+    def _has_sword(self, state: SymbolicState) -> bool:
         return (
             "sword" in state.items
             or "sword" in state.tools
             or state.equipped.get("A") == "sword"
         )
 
-    def _plan(self, state: SymbolicState, memory: AgentMemory) -> SymbolicState:
-        if self._room(state) != "center":
-            return state
-        bridges = state.bridges | BRIDGE_TILES.get(self._bridge(memory), set())
-        all_tiles = {(x, y) for x in range(W) for y in range(H)}
-        return replace(state, bridges=bridges, gaps=all_tiles - bridges)
-
-    def _enqueue(
-        self,
-        memory: AgentMemory,
-        path: list[Position] | None,
-        kind: str,
-        targets: set[Position],
-    ) -> int | None:
-        if not path or len(path) < 2:
-            return None
-        memory.planned_actions = actions_for_tile_path(path)
-        memory.notes["t4k"] = kind
-        memory.notes["t4t"] = self._sig(targets)
-        return memory.planned_actions.pop(0)
-
-    def _clear_stale(self, state: SymbolicState, memory: AgentMemory) -> None:
-        kind = memory.notes.get("t4k")
-        planned = memory.notes.get("t4t")
-        current: tuple[Position, ...] | None = None
-        if kind == "monster":
-            current = self._sig(state.monsters)
-        elif kind == "chest":
-            current = self._sig(state.chests)
-        elif kind == "switch":
-            current = self._sig(state.switches)
-        if current is not None and current != planned:
-            memory.planned_actions.clear()
-            memory.notes.pop("t4k", None)
-            memory.notes.pop("t4t", None)
-
-    def _adjacent(self, player: Position, targets: set[Position]) -> Position | None:
-        px, py = player
-        for tx, ty in sorted(targets):
-            if abs(px - tx) + abs(py - ty) == 1:
-                return (tx, ty)
-        return None
-
-    def _face(self, player: Position, target: Position) -> int | None:
-        px, py = player
-        tx, ty = target
-        if tx == px - 1 and ty == py:
-            return ACTION_LEFT
-        if tx == px + 1 and ty == py:
-            return ACTION_RIGHT
-        if ty == py - 1 and tx == px:
-            return ACTION_UP
-        if ty == py + 1 and tx == px:
-            return ACTION_DOWN
-        return None
-
-    def _exit_goals(self, state: SymbolicState, direction: str) -> set[Position]:
-        axis = 0 if direction in {"west", "east"} else 1
-        val = 0 if direction in {"west", "north"} else (W - 1 if direction == "east" else H - 1)
-        visible = {p for p in state.exits if p[axis] == val}
-        return visible or EXITS[direction]
-
-    def _to_exit(self, state: SymbolicState, memory: AgentMemory, direction: str) -> int:
-        if state.player is None:
-            return ACTION_NOOP
-        goals = self._exit_goals(state, direction)
-        if state.player in goals:
-            return CROSS[direction]
-        action = self._enqueue(memory, bfs_path(self._plan(state, memory), goals), f"{direction}_exit", goals)
-        return action if action is not None else CROSS[direction]
-
-    def _use(self, state: SymbolicState, memory: AgentMemory, targets: set[Position], kind: str) -> int:
-        if self._adjacent(state.player, targets) is not None:  # type: ignore[arg-type]
-            return ACTION_A
-        action = self._enqueue(
-            memory,
-            bfs_path_to_adjacent_target(self._plan(state, memory), targets),
-            kind,
-            targets,
-        )
-        return action if action is not None else ACTION_A
-
-    def _fight(self, state: SymbolicState, memory: AgentMemory, monsters: set[Position]) -> int:
-        if state.player is None or not monsters:
-            return ACTION_NOOP
-        adj = self._adjacent(state.player, monsters)
-        if adj is not None:
-            face = self._face(state.player, adj)
-            if face is not None:
-                memory.planned_actions = [ACTION_A]
-                memory.notes["t4k"] = "monster"
-                memory.notes["t4t"] = self._sig(monsters)
-                return face
-            return ACTION_A
-        action = self._enqueue(
-            memory,
-            bfs_path_to_adjacent_target(self._plan(state, memory), monsters),
-            "monster",
-            monsters,
-        )
-        return action if action is not None else ACTION_A
-
-    def _guardian(self, state: SymbolicState) -> set[Position]:
-        if state.monsters:
-            return set(state.monsters)
-        if self._room(state) == "south":
-            return {GUARDIAN}
-        return set()
-
-    def _switch_targets(self, state: SymbolicState) -> set[Position]:
-        return set(state.switches) or (SWITCH if self._room(state) == "west" else set())
-
-    def _rotate(self, state: SymbolicState, memory: AgentMemory) -> int:
-        want = self._want_bridge(state, memory)
-        cur = self._bridge(memory)
-        if cur == want:
-            return ACTION_NOOP
-        switches = self._switch_targets(state)
-        if switches:
-            if self._adjacent(state.player, switches) is not None:  # type: ignore[arg-type]
-                presses = (BRIDGE_STATES.index(want) - BRIDGE_STATES.index(cur)) % len(BRIDGE_STATES)
-                presses = max(1, presses)
-                memory.planned_actions = [ACTION_A] * presses
-                memory.notes["t4bridge"] = BRIDGE_STATES[(BRIDGE_STATES.index(cur) + presses) % len(BRIDGE_STATES)]
-                return memory.planned_actions.pop(0)
-            return self._use(state, memory, switches, "switch")
-        memory.notes["t4bridge"] = BRIDGE_STATES[(BRIDGE_STATES.index(cur) + 1) % len(BRIDGE_STATES)]
-        return ACTION_A
-
-    def _cross_south(self, state: SymbolicState) -> int:
-        if state.player is None:
-            return ACTION_NOOP
-        px, py = state.player
-        if px < 4:
-            return ACTION_RIGHT
-        if px > 4:
-            return ACTION_LEFT
-        return ACTION_DOWN
-
-    def _enter_center(self, state: SymbolicState, memory: AgentMemory) -> int:
-        memory.planned_actions.clear()
-        memory.notes.pop("t4k", None)
-        memory.notes.pop("t4t", None)
-        if state.player and state.player[0] >= W - 1:
-            return ACTION_RIGHT
-        return self._to_exit(state, memory, "east")
-
-    def _sync_bridge(self, state: SymbolicState, memory: AgentMemory) -> None:
-        if self._room(state) != "center" or not state.bridges:
-            return
-        b = state.bridges
-        if any(x in (4, 5) and y >= 6 for x, y in b):
-            memory.notes["t4bridge"] = "west_to_south"
-        elif any(x in (4, 5) and y <= 1 for x, y in b):
-            memory.notes["t4bridge"] = "west_to_north"
-        elif any(x >= 7 and y in (3, 4) for x, y in b):
-            memory.notes["t4bridge"] = "west_to_east"
-
-    def _go_south(self, state: SymbolicState, memory: AgentMemory) -> int:
-        self._sync_bridge(state, memory)
-        room = self._room(state)
-        phase = str(memory.notes.get("t4post", "leave_east"))
-
-        if room == "south":
-            memory.notes["t4post"] = "kill"
-            return self._fight(state, memory, self._guardian(state))
-
-        if phase == "cross":
-            memory.planned_actions.clear()
-            if room != "center":
-                return self._enter_center(state, memory) if room == "west" else self._to_exit(state, memory, "west")
-            return self._cross_south(state)
-
-        if phase == "return":
-            memory.planned_actions.clear()
-            if room == "center":
-                memory.notes["t4post"] = "cross"
-                return self._cross_south(state)
-            return self._enter_center(state, memory) if room == "west" else self._to_exit(state, memory, "west")
-
-        if phase == "leave_east":
-            if room == "east":
-                return self._to_exit(state, memory, "west")
-            memory.notes["t4post"] = "switch"
-
-        if memory.notes.get("t4post") == "switch":
-            if room == "west":
-                memory.notes["t4post"] = "press"
-            else:
-                return self._to_exit(state, memory, "west")
-
-        if memory.notes.get("t4post") == "press":
-            if room != "west":
-                return self._to_exit(state, memory, "west")
-            if self._bridge(memory) == "west_to_south":
-                memory.notes["t4post"] = "return"
-                return self._enter_center(state, memory)
-            return self._rotate(state, memory)
-
-        return self._to_exit(state, memory, "west")
-
-    def _go(
-        self,
-        state: SymbolicState,
-        memory: AgentMemory,
-        *,
-        bridge: str,
-        direction: str,
-    ) -> int:
-        room = self._room(state)
-        if self._bridge(memory) != bridge:
-            if room == "west":
-                return self._rotate(state, memory)
-            if room == "center":
-                return self._to_exit(state, memory, "west")
-            back = {"north": "south", "south": "north", "east": "west", "west": "east"}
-            return self._to_exit(state, memory, back.get(room, "west"))
-
-        if room == "center":
-            return self._to_exit(state, memory, direction)
-        if room == "west":
-            return self._to_exit(state, memory, "east")
-        if direction == "north" and room == "north" and state.chests:
-            return self._use(state, memory, state.chests, "chest")
-        if direction == "east" and room == "east" and state.chests:
-            return self._use(state, memory, state.chests, "chest")
-        if direction == "south" and room == "south":
-            return self._fight(state, memory, self._guardian(state))
-        if room in {"north", "south", "east"}:
-            return self._to_exit(state, memory, {"north": "south", "south": "north", "east": "west"}[room])
-        return self._to_exit(state, memory, direction)
-
     def act(self, state: SymbolicState, memory: AgentMemory) -> int:
-        self._clear_stale(state, memory)
+        room = self.explorer.update(state, memory)
+        self.explorer.clear_stale_plan(state, memory)
         if memory.planned_actions:
             return memory.planned_actions.pop(0)
-
         if state.player is None:
             return ACTION_NOOP
 
-        self._sync_bridge(state, memory)
-        room = self._room(state)
+        closed_chests = state.chests - state.opened_chests
+        if closed_chests:
+            return self.explorer.interact(state, memory, closed_chests, "chest")
+        if state.monsters and self._has_sword(state):
+            return self.explorer.attack(state, memory)
 
-        if memory.notes.get("t4post") == "kill" and self._sword(state) and not state.monsters:
-            memory.notes["t4guard"] = True
+        if memory.notes.get("inspect_bridge"):
+            if self.explorer.room_has_bridge(memory, room):
+                memory.notes.pop("inspect_bridge", None)
+            else:
+                direction = self.explorer.direction_toward(
+                    memory,
+                    lambda candidate: self.explorer.room_has_bridge(
+                        memory, candidate
+                    ),
+                )
+                if direction is not None:
+                    return self.explorer.move_to_exit(state, memory, direction)
 
-        if self._sword(state) and room == "south" and not memory.notes.get("t4guard") and state.monsters:
-            memory.notes["t4post"] = "kill"
-            return self._fight(state, memory, self._guardian(state))
+        direction = self.explorer.direction_to_frontier(state, memory)
+        if direction is not None:
+            return self.explorer.move_to_exit(state, memory, direction)
 
-        if (
-            self._sword(state)
-            and not state.monsters
-            and not memory.notes.get("t4guard")
-            and (room == "south" or memory.notes.get("t4post") == "kill")
-        ):
-            memory.notes["t4guard"] = True
+        if self.explorer.room_has_switch(memory, room):
+            switches = set(state.switches)
+            if adjacent_target(state.player, switches) is not None:
+                memory.notes["switch_activations"] = (
+                    int(memory.notes.get("switch_activations", 0)) + 1
+                )
+                memory.notes["inspect_bridge"] = True
+                self.explorer.clear_exit_attempts(memory)
+                return ACTION_A
+            return self.explorer.interact(state, memory, switches, "switch")
 
-        if memory.notes.get("t4guard"):
-            if state.chests:
-                return self._use(state, memory, state.chests, "chest")
-            if room != "center":
-                return self._go(state, memory, bridge="west_to_north", direction="north")
-            return self._use(state, memory, {GUARDIAN}, "chest")
-
-        if self._sword(state) and not memory.notes.get("t4guard"):
-            return self._go_south(state, memory)
-
-        if state.keys > 0 and not self._sword(state):
-            if state.chests and room == "east":
-                return self._use(state, memory, state.chests, "chest")
-            return self._go(state, memory, bridge="west_to_east", direction="east")
-
-        if state.keys <= 0:
-            if state.chests and room == "north":
-                return self._use(state, memory, state.chests, "chest")
-            return self._go(state, memory, bridge="west_to_north", direction="north")
-
-        if room == "center":
-            return ACTION_NOOP
-        return self._to_exit(
-            state,
+        direction = self.explorer.direction_toward(
             memory,
-            {"west": "east", "north": "south", "south": "north", "east": "west"}.get(room, "east"),
+            lambda candidate: self.explorer.room_has_switch(memory, candidate),
         )
+        if direction is not None:
+            return self.explorer.move_to_exit(state, memory, direction)
+        return ACTION_NOOP
