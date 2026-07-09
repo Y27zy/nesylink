@@ -14,7 +14,7 @@ from nesylink.core.constants import (
     TILE_SIZE,
 )
 
-from state import Position, SymbolicState
+from .state import Position, SymbolicState
 
 
 MOVE_ACTIONS = (ACTION_UP, ACTION_DOWN, ACTION_LEFT, ACTION_RIGHT)

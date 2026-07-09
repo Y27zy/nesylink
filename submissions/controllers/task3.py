@@ -14,8 +14,8 @@ from nesylink.core.constants import (
     MAP_WIDTH_TILES,
 )
 
-from planner import actions_for_tile_path, bfs_path, bfs_path_to_adjacent_target
-from state import AgentMemory, Position, SymbolicState
+from ..planner import actions_for_tile_path, bfs_path, bfs_path_to_adjacent_target
+from ..state import AgentMemory, Position, SymbolicState
 
 
 TASK_PHASE_KEY = "task3_phase"

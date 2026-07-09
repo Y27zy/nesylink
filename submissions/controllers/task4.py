@@ -15,13 +15,13 @@ from nesylink.core.constants import (
     MAP_WIDTH_TILES,
 )
 
-from planner import (
+from ..planner import (
     actions_for_tile_path,
     bfs_graph_path,
     bfs_path,
     bfs_path_to_adjacent_target,
 )
-from state import AgentMemory, Position, SymbolicState
+from ..state import AgentMemory, Position, SymbolicState
 
 
 DIRECTIONS = ("north", "east", "south", "west")

@@ -4,10 +4,10 @@ from typing import Any
 
 import numpy as np
 
-from state import AgentMemory, SymbolicState
-from vision_dynamic_resnet import extract_dynamic_objects
-from vision_interactive import extract_interactive_tiles
-from vision_static_resnet import extract_static_tiles
+from .state import AgentMemory, SymbolicState
+from .vision_dynamic_resnet import extract_dynamic_objects
+from .vision_interactive import extract_interactive_tiles
+from .vision_static_resnet import extract_static_tiles
 
 
 TILE_SIZE = 16

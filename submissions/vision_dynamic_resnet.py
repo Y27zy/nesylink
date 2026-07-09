@@ -7,8 +7,8 @@ from typing import Any, Literal
 
 import numpy as np
 
-from state import Position
-from vision_static_resnet import ROOM_HEIGHT_TILES, ROOM_WIDTH_TILES, TILE_SIZE, color_mask
+from .state import Position
+from .vision_static_resnet import ROOM_HEIGHT_TILES, ROOM_WIDTH_TILES, TILE_SIZE, color_mask
 
 
 DynamicLabel = Literal["player", "monster_chaser", "monster_patroller", "monster_ambusher"]

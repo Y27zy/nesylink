@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from state import Position
+from .state import Position
 
 
 TileLabel = str

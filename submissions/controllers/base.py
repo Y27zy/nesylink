@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from nesylink.core.constants import ACTION_NOOP
 
-from state import AgentMemory, SymbolicState
+from ..state import AgentMemory, SymbolicState
 
 
 class BaseController:
@@ -12,4 +12,3 @@ class BaseController:
     def act(self, state: SymbolicState, memory: AgentMemory) -> int:
         del state, memory
         return ACTION_NOOP
-

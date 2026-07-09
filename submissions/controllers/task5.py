@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from nesylink.core.constants import ACTION_B, ACTION_NOOP
 
-from controllers.task4 import RoomExplorer
-from planner import bfs_path
-from state import AgentMemory, SymbolicState
+from .task4 import RoomExplorer
+from ..planner import bfs_path
+from ..state import AgentMemory, SymbolicState
 
 
 class Task5Controller:

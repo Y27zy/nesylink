@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from controllers import make_controller
+from submissions.controllers import make_controller
 from nesylink.core.constants import ACTION_NOOP
-from state import AgentMemory
-from vision import extract_symbolic_state
+from submissions.state import AgentMemory
+from submissions.vision import extract_symbolic_state
 
 
 class Policy:

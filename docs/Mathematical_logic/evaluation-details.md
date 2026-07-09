@@ -103,19 +103,19 @@ policy.act(obs)
 
 ## 四、命令行参数
 
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `--policy` | 可选 | 所有任务共用的 policy 文件或模块路径，可带 `:attribute` |
-| `--task-policy` | 可选 | 单个任务的 policy，格式为 `TASK_ID=POLICY_SPEC`，可重复传入 |
-| `--tasks` | 五个数理逻辑任务 | 要测评的任务 ID 列表 |
-| `--num-envs` | `100` | 普通测评时表示每个任务、每种观测变体的 episode 数；启用 `--robustness-suite` 时表示每个任务的总 episode 数 |
-| `--seed` | `0` | 起始随机种子，第 `i` 个 episode 使用 `seed + i` |
-| `--max-steps` | 任务默认值 | 覆盖任务最大步数 |
-| `--action-repeat` | 任务默认值 | 覆盖环境的 `action_repeat` |
-| `--render-mode` | `None` | 可设为 `rgb_array` |
-| `--obs-variants` | `default` | 传给 policy 前应用的像素观测变体 |
-| `--robustness-suite` | 关闭 | 启用固定比例鲁棒性测评套件 |
-| `--json-out` | `None` | 将详细结果写入 JSON 文件 |
+| 参数                   | 默认值           | 说明                                                                                                        |
+| ---------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------- |
+| `--policy`           | 可选             | 所有任务共用的 policy 文件或模块路径，可带`:attribute`                                                    |
+| `--task-policy`      | 可选             | 单个任务的 policy，格式为`TASK_ID=POLICY_SPEC`，可重复传入                                                |
+| `--tasks`            | 五个数理逻辑任务 | 要测评的任务 ID 列表                                                                                        |
+| `--num-envs`         | `100`          | 普通测评时表示每个任务、每种观测变体的 episode 数；启用`--robustness-suite` 时表示每个任务的总 episode 数 |
+| `--seed`             | `0`            | 起始随机种子，第`i` 个 episode 使用 `seed + i`                                                          |
+| `--max-steps`        | 任务默认值       | 覆盖任务最大步数                                                                                            |
+| `--action-repeat`    | 任务默认值       | 覆盖环境的`action_repeat`                                                                                 |
+| `--render-mode`      | `None`         | 可设为`rgb_array`                                                                                         |
+| `--obs-variants`     | `default`      | 传给 policy 前应用的像素观测变体                                                                            |
+| `--robustness-suite` | 关闭             | 启用固定比例鲁棒性测评套件                                                                                  |
+| `--json-out`         | `None`         | 将详细结果写入 JSON 文件                                                                                    |
 
 示例：
 
@@ -143,16 +143,16 @@ mathematical_logic/task_1 stage=original obs_variant=default map_variant=default
 
 字段含义：
 
-| 字段 | 含义 |
-|---|---|
-| `task_id` | 当前任务 |
-| `stage` | 当前测评阶段 |
-| `obs_variant` | 当前观测变体 |
+| 字段            | 含义                                                                       |
+| --------------- | -------------------------------------------------------------------------- |
+| `task_id`     | 当前任务                                                                   |
+| `stage`       | 当前测评阶段                                                               |
+| `obs_variant` | 当前观测变体                                                               |
 | `map_variant` | 当前地图变体，`default` 表示原始地图，`spatial_a/b/c` 表示坐标扰动地图 |
-| `seed` | 当前 episode 的随机种子 |
-| `success` | 是否完成任务目标 |
-| `steps` | episode 执行步数 |
-| `reward` | episode 累计奖励 |
+| `seed`        | 当前 episode 的随机种子                                                    |
+| `success`     | 是否完成任务目标                                                           |
+| `steps`       | episode 执行步数                                                           |
+| `reward`      | episode 累计奖励                                                           |
 
 汇总结果按 `(task_id, stage)` 分组，避免不同测评阶段的成功率混在一起：
 
@@ -181,21 +181,21 @@ mathematical_logic/task_1 [redraw]
 
 `summary` 是按任务和测评阶段聚合后的统计结果；`episodes` 是每个 episode 的详细结果。每个 episode 包含：
 
-| 字段 | 含义 |
-|---|---|
-| `task_id` | 任务 ID |
-| `eval_stage` | 测评阶段 |
-| `obs_variant` | 观测变体 |
-| `map_variant` | 地图变体 |
-| `seed` | 随机种子 |
-| `steps` | 执行步数 |
-| `total_reward` | 累计奖励 |
-| `terminated` | 是否自然终止 |
-| `truncated` | 是否因步数上限截断 |
-| `success` | 是否完成任务 |
-| `terminal_reason` | 终止原因 |
-| `event_counts` | episode 内事件计数 |
-| `milestones` | 关键里程碑是否达成 |
+| 字段                | 含义               |
+| ------------------- | ------------------ |
+| `task_id`         | 任务 ID            |
+| `eval_stage`      | 测评阶段           |
+| `obs_variant`     | 观测变体           |
+| `map_variant`     | 地图变体           |
+| `seed`            | 随机种子           |
+| `steps`           | 执行步数           |
+| `total_reward`    | 累计奖励           |
+| `terminated`      | 是否自然终止       |
+| `truncated`       | 是否因步数上限截断 |
+| `success`         | 是否完成任务       |
+| `terminal_reason` | 终止原因           |
+| `event_counts`    | episode 内事件计数 |
+| `milestones`      | 关键里程碑是否达成 |
 
 `summary` 中的 `progress_rates` 表示某类进展事件在该阶段 episode 中出现过的比例。例如：
 
@@ -228,14 +228,14 @@ python utils/evaluate_policy.py \
 
 当前支持的颜色/亮度变体：
 
-| 变体 | 说明 |
-|---|---|
-| `default` | 原始像素观测，不做修改 |
-| `grayscale` | 转为灰度图后复制为 3 通道 RGB |
-| `dark` | 整体变暗 |
-| `bright` | 整体变亮 |
-| `high_contrast` | 按阈值二值化，形成高对比图 |
-| `inverted` | RGB 反色 |
+| 变体              | 说明                          |
+| ----------------- | ----------------------------- |
+| `default`       | 原始像素观测，不做修改        |
+| `grayscale`     | 转为灰度图后复制为 3 通道 RGB |
+| `dark`          | 整体变暗                      |
+| `bright`        | 整体变亮                      |
+| `high_contrast` | 按阈值二值化，形成高对比图    |
+| `inverted`      | RGB 反色                      |
 
 ## 八、测试内容：重画渲染方法
 
@@ -253,20 +253,20 @@ python utils/evaluate_policy.py \
 
 使用几何形状替代原始 sprite：
 
-| 对象 | 新图像表示 |
-|---|---|
-| floor | 深色网格背景 |
-| wall | 白色实心方块 |
-| chest | 黄色菱形 |
-| agent | 青色圆形，内部三角表示朝向 |
-| monster | 红色六边形 |
-| trap | 紫色 X |
-| button | 绿色圆点 |
-| switch | 橙色菱形 |
-| exit | 蓝色门框 |
-| gap | 黑色圆洞 |
-| bridge | 棕色桥板 |
-| npc | 粉色十字 |
+| 对象    | 新图像表示                 |
+| ------- | -------------------------- |
+| floor   | 深色网格背景               |
+| wall    | 白色实心方块               |
+| chest   | 黄色菱形                   |
+| agent   | 青色圆形，内部三角表示朝向 |
+| monster | 红色六边形                 |
+| trap    | 紫色 X                     |
+| button  | 绿色圆点                   |
+| switch  | 橙色菱形                   |
+| exit    | 蓝色门框                   |
+| gap     | 黑色圆洞                   |
+| bridge  | 棕色桥板                   |
+| npc     | 粉色十字                   |
 
 预览：
 
@@ -274,21 +274,20 @@ python utils/evaluate_policy.py \
 
 ### 方案二
 
-
-| 对象 | 新图像表示 |
-|---|---|
-| floor | 浅灰背景 |
-| wall | 黑色实心方块 |
-| chest | 金色方框加中央标记 |
-| agent | 白色三角箭头 |
-| monster | 红色符号块 |
-| trap | 紫色警告三角 |
-| button | 绿色圆点 |
-| switch | 橙色斜杠 |
-| exit | 蓝色门框 |
-| gap | 黑色空洞 |
-| bridge | 棕色桥板 |
-| npc | 粉色简化人形 |
+| 对象    | 新图像表示         |
+| ------- | ------------------ |
+| floor   | 浅灰背景           |
+| wall    | 黑色实心方块       |
+| chest   | 金色方框加中央标记 |
+| agent   | 白色三角箭头       |
+| monster | 红色符号块         |
+| trap    | 紫色警告三角       |
+| button  | 绿色圆点           |
+| switch  | 橙色斜杠           |
+| exit    | 蓝色门框           |
+| gap     | 黑色空洞           |
+| bridge  | 棕色桥板           |
+| npc     | 粉色简化人形       |
 
 预览：
 
@@ -341,28 +340,28 @@ python utils/evaluate_policy.py \
 
 启用 `--robustness-suite` 后，`--num-envs` 表示每个 task 的总 episode 数。脚本会按任务切分为不同测评阶段：
 
-| 任务 | `original` | `spatial` | `color` | `redraw` |
-|---|---:|---:|---:|---:|
-| Task 1-3 | 50% | 30% | 10% | 10% |
-| Task 4-5 | 80% | 0% | 10% | 10% |
+| 任务     | `original` | `spatial` | `color` | `redraw` |
+| -------- | -----------: | ----------: | --------: | ---------: |
+| Task 1-3 |          50% |         30% |       10% |        10% |
+| Task 4-5 |          80% |          0% |       10% |        10% |
 
 例如 `--num-envs 100` 时：
 
-| 任务 | `original` | `spatial` | `color` | `redraw` |
-|---|---:|---:|---:|---:|
-| Task 1-3 | 50 | 30 | 10 | 10 |
-| Task 4-5 | 80 | 0 | 10 | 10 |
+| 任务     | `original` | `spatial` | `color` | `redraw` |
+| -------- | -----------: | ----------: | --------: | ---------: |
+| Task 1-3 |           50 |          30 |        10 |         10 |
+| Task 4-5 |           80 |           0 |        10 |         10 |
 
 正式实验报告建议使用默认的 `--num-envs 100` 或更高轮数；如果只是检查脚本和 policy 接口是否能跑通，可以临时传更小的值做 smoke test。
 
 阶段含义：
 
-| 阶段 | 使用的观测变体 | 使用的地图变体 | 说明 |
-|---|---|---|---|
-| `original` | `default` | `default` | 原始地图和原始渲染输入 |
-| `spatial` | `default` | `spatial_a/b/c` 循环使用 | 仅 Task 1-3 使用，扰动 spawn、障碍、怪物或宝箱位置 |
-| `color` | `grayscale/dark/bright/high_contrast/inverted` 循环使用 | `default` | 改变颜色、亮度和对比度 |
-| `redraw` | `redraw_geometric/redraw_symbols` 交替使用 | `default` | 改变角色、物体和地图的绘制方式 |
+| 阶段         | 使用的观测变体                                            | 使用的地图变体             | 说明                                               |
+| ------------ | --------------------------------------------------------- | -------------------------- | -------------------------------------------------- |
+| `original` | `default`                                               | `default`                | 原始地图和原始渲染输入                             |
+| `spatial`  | `default`                                               | `spatial_a/b/c` 循环使用 | 仅 Task 1-3 使用，扰动 spawn、障碍、怪物或宝箱位置 |
+| `color`    | `grayscale/dark/bright/high_contrast/inverted` 循环使用 | `default`                | 改变颜色、亮度和对比度                             |
+| `redraw`   | `redraw_geometric/redraw_symbols` 交替使用              | `default`                | 改变角色、物体和地图的绘制方式                     |
 
 输出 summary 会按阶段给出成功率和进展：
 
@@ -382,18 +381,15 @@ mathematical_logic/task_3 [original]
 
 最终实验报告应按 task 和阶段分别报告成功率：
 
-| 任务 | 报告中必须包含的阶段成功率 |
-|---|---|
+| 任务   | 报告中必须包含的阶段成功率                       |
+| ------ | ------------------------------------------------ |
 | Task 1 | `original`、`spatial`、`color`、`redraw` |
 | Task 2 | `original`、`spatial`、`color`、`redraw` |
 | Task 3 | `original`、`spatial`、`color`、`redraw` |
-| Task 4 | `original`、`color`、`redraw` |
-| Task 5 | `original`、`color`、`redraw` |
+| Task 4 | `original`、`color`、`redraw`              |
+| Task 5 | `original`、`color`、`redraw`              |
 
 其中 Task 1-3 的 `spatial` 阶段用于评估坐标扰动后的泛化能力；Task 4-5 不运行 `spatial` 阶段，因为任务难度更高，鲁棒性测试只覆盖颜色变化和绘制方式变化。
-
-
-
 
 ## 十一、注意事项
 
