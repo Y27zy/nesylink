@@ -135,3 +135,40 @@ def bfs_graph_path(
                 parent[neighbor] = node
                 queue.append(neighbor)
     return None
+
+def align_to_tile_center(state: SymbolicState) -> list[int]:
+    """返回将玩家对齐到当前 tile 标准中心 (16*x, 16*y) 所需的动作序列。"""
+    if state.player is None:
+        return []
+    print("align")
+    tx, ty = state.player
+    ideal_cx = tx * TILE_SIZE          # 16 * x
+    ideal_cy = ty * TILE_SIZE     # 16 * y
+
+    # 从 dynamic_objects 取实际的 center_px
+    dyn_objs = state.raw_features.get("dynamic_objects", [])
+    actual_cx = actual_cy = None
+    for obj in dyn_objs:
+        if obj.kind == "player":
+            actual_cx, actual_cy = obj.center_px
+            break
+
+    if actual_cx is None:
+        return []
+
+    dx = ideal_cx - actual_cx
+    dy = ideal_cy - actual_cy
+
+    actions: list[int] = []
+    if dx > 0:
+        actions.extend([ACTION_RIGHT] * dx)
+    elif dx < 0:
+        actions.extend([ACTION_LEFT] * (-dx))
+    if dy > 0:
+        actions.extend([ACTION_DOWN] * dy)
+    elif dy < 0:
+        actions.extend([ACTION_UP] * (-dy))
+    print("=========")
+    print(actions)
+    print("================")
+    return actions
