@@ -109,7 +109,6 @@ class OptionalResNetDynamicDetector:
             y = flat_index // W
             x = flat_index % W
             center_px = (x, y)
-
             # 反算 tile 坐标（兼容现有 vision.py 接口）
             tile = (x // TILE_SIZE, y // TILE_SIZE)
             bbox = bbox_from_center(center_px, size=TILE_SIZE)

@@ -1,4 +1,5 @@
 .venv/
+.lake/
 
 *.egg-info
 dist/
