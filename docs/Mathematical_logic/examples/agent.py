@@ -41,8 +41,7 @@ class Policy:
         self.plan = build_task1_plan()
         self.index = 0
 
-    def reset(self, seed: int | None = None, task_id: str | None = None) -> None:
-        del seed, task_id
+    def reset(self) -> None:
         self.index = 0
 
     def act(self, obs, info) -> int:

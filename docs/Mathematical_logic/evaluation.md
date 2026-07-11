@@ -1,6 +1,8 @@
 # 数理逻辑任务测评说明
 
-本文档只说明策略性能测评的核心规则和固定比例鲁棒性测试。测评脚本的完整参数、policy 接口、JSON 字段和实现细节见 [测评脚本细节说明](evaluation-details.md)。
+本文档以当前的 [测评脚本](../../utils/evaluate_policy.py) 为准，完整说明策略性能测评的成功判定、Agent 接口、输入信息、运行模式、观测变体和结果字段。
+
+正式测评使用五个任务 `mathematical_logic/task_1` 到 `mathematical_logic/task_5`，并固定使用 `observation_mode="pixels"`。
 
 ## 一、评分依据
 
@@ -10,96 +12,316 @@
 success_rate = 成功完成任务的 episode 数 / 总 episode 数
 ```
 
-一次 episode 是否成功，以环境返回的任务完成信号为准，包括 `world_completed` 或等价的终止原因。也就是说，正确率按“是否完成整个任务”计算，而不是按单步动作是否正确计算。
+一次 episode 满足以下任一条件时记为成功：
 
-除最终成功率外，测评脚本还会统计阶段性进展，例如：
+- `info["game"]["world_completed"] == True`
+- `info["terminal_reason"] == "world_completed"`
+- episode 已终止，并且 reward 终止原因为 `world_completed`
+
+因此，成功率按“是否完成整个任务”计算，不按单步动作是否正确计算。
+
+测评脚本还会统计阶段性进展，例如：
 
 - 物品搜集：`key_collected`、`gold_collected`、`item_collected`
-- 宝箱与机关：`chest_opened`、`button_pressed`、`door_opened`
+- 宝箱与机关：`chest_opened`、`button_pressed`、`switch_activated`、`door_opened`
 - 战斗与风险：`monster_killed`、`trap_triggered`、`agent_dead`
 - 地图推进：`room_changed`、`exit_reached`、`environment_completed`
 
-这些进度指标用于分析 agent 已经完成了哪些子目标，不替代最终成功率。
+这些指标用于分析 Agent 已完成的子目标，不替代最终成功率。Task 3、Task 4 和 Task 5 还会输出对应的 milestone；Task 5 会额外打印主要游戏事件的累计次数。
 
-## 二、固定比例鲁棒性测评
+## 二、提交 Policy
 
-最终使用固定比例鲁棒性套件：
+### 1. 共享策略
+
+使用 `--policy` 为所有被测任务指定同一个策略：
 
 ```bash
 python utils/evaluate_policy.py \
-  --policy submissions/student_policy.py \
-  --robustness-suite \
-  --num-envs 100 \
-  --json-out results/robustness_suite_eval.json
+  --policy submissions/shared_agent.py \
+  --tasks mathematical_logic/task_1 mathematical_logic/task_2
 ```
 
-如果每个 task 有单独的 agent 文件，也可以分别指定：
-（需要给出你们自己的调用方法）
+共享策略在正式 `safe` 模式下不会收到任务编号，需要根据像素观测、奖励历史和物品栏自行决策。
+
+### 2. 单任务专用策略
+
+使用可重复的 `--task-policy TASK_ID=POLICY_SPEC` 为不同任务指定不同策略：
 
 ```bash
 python utils/evaluate_policy.py \
   --tasks mathematical_logic/task_1 mathematical_logic/task_2 \
   --task-policy mathematical_logic/task_1=submissions/task1_agent.py \
+  --task-policy mathematical_logic/task_2=submissions/task2_agent.py
+```
+
+在正式 `safe` 模式下，通过 `--task-policy` 显式绑定的策略会在 `info["task_id"]` 中收到对应任务 ID。
+
+如果同时提供 `--policy` 和 `--task-policy`，后者覆盖对应任务，其他任务继续使用共享策略。如果没有提供 `--policy`，则每个被测任务都必须有对应的 `--task-policy`。
+
+### 3. Policy 文件接口
+
+测评脚本按以下顺序从模块或 Python 文件中寻找策略对象：
+
+1. `make_policy()`
+2. `Policy` 类
+3. 模块级 `policy` 对象
+4. 模块级 `act` 函数
+
+推荐接口：
+
+```python
+class Policy:
+    def reset(self):
+        pass
+
+    def act(self, obs, info):
+        return 0
+
+
+def make_policy():
+    return Policy()
+```
+
+每个 episode 开始前，如果策略实现了 `reset()`，脚本会无参数调用一次。脚本优先调用 `act(obs, info)`；仅实现单参数接口时，也支持 `act(obs)`。
+
+动作返回值必须能转换为单个整数。脚本也接受 `{"action": value}`、非空 tuple/list 的第一个元素或 NumPy 标量，最终动作必须属于环境动作空间 `0..6`。
+
+同一个 policy spec 当前只加载一次，其对象会在多个 episode 之间复用，`reset()` 只是新 episode 的回调。课程规则仍要求正式测评时只进行推理，不得借此跨 episode 更新模型或继续训练。
+
+## 三、正式 Agent 输入
+
+### 1. 像素观测
+
+`obs` 是当前地图区域的 RGB 图像：
+
+```text
+shape: (128, 160, 3)
+dtype: uint8
+```
+
+正式测评不会把结构化 observation 传给 Agent。
+
+### 2. safe_info
+
+正式测评使用默认的 `--info-mode safe`。共享策略收到：
+
+```python
+{
+    "last_reward": 0.0,
+    "inventory": {
+        "gold": 0,
+        "keys": 0,
+        "items": ["sword", "shield"],
+        "tools": ["sword", "shield"],
+        "equipped": {"A": "sword", "B": "shield"},
+    },
+}
+```
+
+通过 `--task-policy` 绑定的专用策略额外收到：
+
+```python
+{"task_id": "mathematical_logic/task_3"}
+```
+
+`last_reward` 是上一步 `env.step()` 返回的标量奖励，在 reset 后第一次决策时为 `0.0`。
+
+正式 `safe_info` 不包含玩家坐标、血量、朝向、房间 ID、对象数量、对象坐标、地图变体、颜色变体、seed、事件、完成状态、终止原因或 reward 细分信号。测评脚本内部仍使用完整环境信息统计结果，但不会通过 `safe_info` 传给 Agent。
+
+### 3. full 调试模式
+
+本地调试可以显式使用：
+
+```bash
+python utils/evaluate_policy.py \
+  --policy submissions/student_policy.py \
+  --tasks mathematical_logic/task_1 \
+  --info-mode full
+```
+
+`full` 模式直接把环境原始 `info` 传给策略，不再使用上述 safe schema，可能包含内部状态、事件和 reward 信号。该模式只用于本地训练、oracle、可视化或排查问题，不属于正式测评口径。
+
+## 四、固定比例鲁棒性测评
+
+正式鲁棒性测评命令：
+
+```bash
+python utils/evaluate_policy.py \
+  --policy submissions/student_policy.py \
+  --info-mode safe \
+  --robustness-suite \
+  --num-envs 100 \
+  --json-out results/robustness_suite_eval.json
+```
+
+五个任务分别使用专用策略时：
+
+```bash
+python utils/evaluate_policy.py \
+  --tasks \
+    mathematical_logic/task_1 \
+    mathematical_logic/task_2 \
+    mathematical_logic/task_3 \
+    mathematical_logic/task_4 \
+    mathematical_logic/task_5 \
+  --task-policy mathematical_logic/task_1=submissions/task1_agent.py \
   --task-policy mathematical_logic/task_2=submissions/task2_agent.py \
+  --task-policy mathematical_logic/task_3=submissions/task3_agent.py \
+  --task-policy mathematical_logic/task_4=submissions/task4_agent.py \
+  --task-policy mathematical_logic/task_5=submissions/task5_agent.py \
+  --info-mode safe \
+  --robustness-suite \
+  --num-envs 100 \
+  --json-out results/robustness_suite_eval.json
+```
+
+也可以使用共享策略并覆盖少数任务：
+
+```bash
+python utils/evaluate_policy.py \
+  --policy submissions/shared_agent.py \
+  --task-policy mathematical_logic/task_4=submissions/task4_specialist.py \
+  --task-policy mathematical_logic/task_5=submissions/task5_specialist.py \
+  --info-mode safe \
   --robustness-suite \
   --num-envs 100
 ```
 
-启用 `--robustness-suite` 后，`--num-envs` 表示每个 task 的总 episode 数。测评脚本会按任务难度和扰动类型切分这些 episode：
+启用 `--robustness-suite` 后，`--num-envs` 表示每个 task 的总 episode 数。脚本按 60% / 30% / 10% 切分；当数量不能整除时，按最大余数法分配，三类 episode 总数仍等于 `--num-envs`。
 
-| 任务     | `original` | `spatial` | `color` | `redraw` |
-| -------- | -----------: | ----------: | --------: | ---------: |
-| Task 1-3 |          50% |         30% |       10% |        10% |
-| Task 4-5 |          80% |          0% |       10% |        10% |
+| 阶段         | 比例 | `--num-envs 100` | 观测             | 地图                   |
+| ------------ | ---: | -----------------: | ---------------- | ---------------------- |
+| `original` |  60% |                 60 | `default`      | 原始地图               |
+| `spatial`  |  30% |                 30 | `default`      | `spatial_a/b/c` 循环 |
+| `color`    |  10% |                 10 | 五种颜色变体循环 | 原始地图               |
 
-例如 `--num-envs 100` 时，Task 1-3 分别运行 50 轮原始地图、30 轮坐标扰动地图、10 轮颜色变换、10 轮重画图像；Task 4-5 分别运行 80 轮原始地图、10 轮颜色变换、10 轮重画图像。若只是调试评测流程，可以临时传更小的 `--num-envs` 做 smoke test。
+该固定套件适用于全部五个任务：
 
-各阶段含义如下：
+- `original` 使用原始地图和原始像素。
+- `spatial` 使用临时生成的地图副本，改变部分布局、出生点或对象位置；三个固定地图变体循环使用。
+- `color` 依次循环 `grayscale`、`dark`、`bright`、`high_contrast`、`inverted`，只改变传给策略的像素观测，不改变环境状态。
 
-| 阶段         | 输入变化                                                   | 目的                               |
-| ------------ | ---------------------------------------------------------- | ---------------------------------- |
-| `original` | 原始地图和原始渲染输入`default`                          | 测试能否在标准环境中完成任务       |
-| `spatial`  | 仅 Task 1-3 使用，扰动房间中的 spawn、障碍、怪物或宝箱位置 | 测试策略是否依赖固定坐标和固定路线 |
-| `color`    | 灰度、变暗、变亮、高对比度、反色循环使用                   | 测试对颜色和亮度变化的鲁棒性       |
-| `redraw`   | 使用几何重画或符号重画                                     | 测试对角色和物体形状变化的鲁棒性   |
+在鲁棒性模式下，episode 计划由脚本固定生成，命令行提供的 `--obs-variants` 不参与该计划。
 
-## 三、重画方案
+## 五、episode 执行流程
 
-### 方案一：几何重画
+每个 episode 的执行顺序为：
 
-方案一使用几何形状替代原始 sprite，例如：墙是白色方块，宝箱是黄色菱形，agent 是青色圆形加方向三角，怪物是红色六边形。
+1. 选择当前任务绑定的 policy。
+2. 无参数调用可选的 `policy.reset()`。
+3. 使用当前 seed 调用 `env.reset()`。
+4. 构造第一次 `safe_info`，其中 `last_reward=0.0`。
+5. 循环调用 policy、检查动作、执行 `env.step()`，并将本步 reward 作为下一次决策的 `last_reward`。
+6. episode 终止或达到任务 `max_steps` 后关闭环境并记录结果。
 
-![redraw_geometric](assets/redraw_geometric.png)
+默认 episode seed 为 `--seed + episode_index`。`--max-steps` 和 `--action-repeat` 可以覆盖任务配置，但正式报告应记录是否使用了覆盖值。
 
-### 方案二：符号重画
+## 六、结果解读
 
-方案二使用更抽象的符号图，例如：墙是黑色方块，宝箱是金色方框加标记，agent 是白色三角箭头，怪物是红色符号块。
-
-![redraw_symbols](assets/redraw_symbols.png)
-
-## 四、结果解读
-
-summary 会按 `(task_id, stage)` 分组输出。例如：
+每个 episode 会输出一行结果，例如普通默认模式下：
 
 ```text
-mathematical_logic/task_3 [redraw]
-  episodes:     10
+mathematical_logic/task_1 stage=default obs_variant=default map_variant=default seed=0 success=True steps=290 reward=127.050
+```
+
+summary 按 `(task_id, eval_stage)` 分组。鲁棒性模式下的示例：
+
+```text
+mathematical_logic/task_3 [spatial]
+  episodes:     30
   success_rate: 0.700
   avg_steps:    420.5
   avg_reward:   18.300
-  variants:     {'redraw_geometric': 5, 'redraw_symbols': 5}
-  map_variants: {'default': 10}
+  variants:     {'default': 30}
+  map_variants: {'spatial_a': 10, 'spatial_b': 10, 'spatial_c': 10}
+  milestones:
+    monster_killed: 0.800
+    key_collected: 0.700
   progress:
-    key_collected: 0.900
-    chest_opened: 0.800
-    monster_killed: 0.600
+    monster_killed: 0.800
+    key_collected: 0.700
 ```
 
-最终实验报告应至少包含：
+主要字段含义：
 
-- Task 1-3 每个阶段的测评成功率：`original`、`spatial`、`color`、`redraw`。
-- Task 4-5 每个阶段的测评成功率：`original`、`color`、`redraw`。
-- `spatial` 阶段中使用的 `map_variants` 分布，用于说明坐标扰动样本覆盖情况。
-- `progress` 指标：即使没有最终通关，是否完成了钥匙、宝箱、怪物、出口等子目标
+| 字段             | 含义                                                      |
+| ---------------- | --------------------------------------------------------- |
+| `success_rate` | 该分组成功完成整个任务的 episode 比例                     |
+| `avg_steps`    | 该分组平均执行步数                                        |
+| `avg_reward`   | 该分组平均累计奖励                                        |
+| `variants`     | 该分组包含的观测变体及数量                                |
+| `map_variants` | 该分组包含的地图变体及数量                                |
+| `milestones`   | 指定任务的关键事件达成率                                  |
+| `progress`     | 某事件至少出现一次的 episode 比例；从未出现的事件不会显示 |
 
-更多参数和输出字段见 [测评脚本细节说明](evaluation-details.md)。
+## 七、JSON 输出
+
+传入 `--json-out PATH` 后，脚本写出：
+
+```json
+{
+  "summary": {},
+  "episodes": []
+}
+```
+
+`summary` 与终端汇总一致；`episodes` 中每个元素包含：
+
+| 字段                | 含义                       |
+| ------------------- | -------------------------- |
+| `task_id`         | 任务 ID                    |
+| `eval_stage`      | 测评阶段                   |
+| `obs_variant`     | 观测变体                   |
+| `map_variant`     | 地图变体                   |
+| `seed`            | episode 随机种子           |
+| `steps`           | 执行步数                   |
+| `total_reward`    | episode 累计奖励           |
+| `terminated`      | 是否自然终止               |
+| `truncated`       | 是否因步数上限截断         |
+| `success`         | 是否完成整个任务           |
+| `terminal_reason` | 终止原因                   |
+| `event_counts`    | episode 内事件累计次数     |
+| `milestones`      | 该任务的关键里程碑是否达成 |
+
+`summary[分组]["progress_rates"]` 表示某事件至少出现一次的 episode 比例。例如：
+
+```json
+{
+  "key_collected": 0.8,
+  "chest_opened": 0.6,
+  "monster_killed": 0.4
+}
+```
+
+这表示 80% 的 episode 收集过钥匙、60% 打开过宝箱、40% 击杀过怪物，不表示这些 episode 已最终通关。
+
+当前 JSON 不会自动记录完整命令、`info_mode`、policy 路径、`max_steps`、`action_repeat` 或代码版本，因此实验报告还应保存实际运行命令和仓库版本。
+
+## 八、常用参数
+
+| 参数                   | 默认值           | 含义                                                              |
+| ---------------------- | ---------------- | ----------------------------------------------------------------- |
+| `--policy`           | 无               | 共享 policy 文件或模块，可带`:attribute`                        |
+| `--task-policy`      | 无               | `TASK_ID=POLICY_SPEC`，可重复并覆盖共享 policy                  |
+| `--tasks`            | 五个数理逻辑任务 | 被测任务列表                                                      |
+| `--num-envs`         | `100`          | 普通模式下为每 task、每观测变体的数量；鲁棒性模式下为每 task 总数 |
+| `--seed`             | `0`            | episode seed 的起点                                               |
+| `--max-steps`        | 任务配置         | 覆盖最大步数                                                      |
+| `--action-repeat`    | 任务配置         | 覆盖动作重复次数                                                  |
+| `--render-mode`      | `None`         | 可选`rgb_array`                                                 |
+| `--info-mode`        | `safe`         | `safe` 用于正式测评，`full` 用于本地调试                      |
+| `--obs-variants`     | `default`      | 普通模式使用的像素变体                                            |
+| `--robustness-suite` | 关闭             | 启用固定 60% / 30% / 10% 套件                                     |
+| `--json-out`         | 无               | 写出详细 JSON 结果                                                |
+
+## 九、报告要求
+
+正式实验报告至少应包含：
+
+- 每个 task 在 `original`、`spatial`、`color` 三个阶段的成功率
+- `avg_steps`、`avg_reward`、milestone 和 progress 指标
+- 实际测评命令、seed、episode 数及是否覆盖 `max_steps` / `action_repeat`
+- 使用的 policy 文件、模型权重和代码版本
+- 训练或调试阶段是否使用过完整环境 `info`
+
+正式成绩应以 `--info-mode safe --robustness-suite` 的实际运行结果为准。

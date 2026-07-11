@@ -16,6 +16,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib
 import importlib.util
 import json
@@ -63,6 +64,8 @@ SPATIAL_TASKS = {
     "mathematical_logic/task_1",
     "mathematical_logic/task_2",
     "mathematical_logic/task_3",
+    "mathematical_logic/task_4",
+    "mathematical_logic/task_5",
 }
 SPATIAL_MAP_VARIANTS = (
     "spatial_a",
@@ -137,6 +140,12 @@ class EpisodeResult:
     map_variant: str = "default"
 
 
+@dataclass(frozen=True)
+class PolicyBinding:
+    policy: Any
+    receives_task_id: bool
+
+
 def split_policy_spec(spec: str) -> tuple[str, str | None]:
     if ":" not in spec:
         return spec, None
@@ -199,7 +208,7 @@ def resolve_policies(
     default_policy_spec: str | None,
     task_policy_specs: list[str] | None,
     task_ids: list[str],
-) -> dict[str, Any]:
+) -> dict[str, PolicyBinding]:
     task_policy_map = parse_task_policy_specs(task_policy_specs)
     missing_task_ids = [
         task_id
@@ -214,27 +223,26 @@ def resolve_policies(
     if default_policy_spec is not None:
         loaded_by_spec[default_policy_spec] = load_policy(default_policy_spec)
 
-    policies: dict[str, Any] = {}
+    policies: dict[str, PolicyBinding] = {}
     for task_id in task_ids:
         policy_spec = task_policy_map.get(task_id, default_policy_spec)
         assert policy_spec is not None
         if policy_spec not in loaded_by_spec:
             loaded_by_spec[policy_spec] = load_policy(policy_spec)
-        policies[task_id] = loaded_by_spec[policy_spec]
+        policies[task_id] = PolicyBinding(
+            policy=loaded_by_spec[policy_spec],
+            receives_task_id=task_id in task_policy_map,
+        )
     return policies
 
 
-def reset_policy(policy: Any, *, seed: int, task_id: str) -> None:
+def reset_policy(policy: Any) -> None:
     reset = getattr(policy, "reset", None)
     if reset is None:
         return
-    try:
-        reset(seed=seed, task_id=task_id)
-    except TypeError:
-        try:
-            reset(seed=seed)
-        except TypeError:
-            reset()
+    if not callable(reset):
+        raise TypeError("policy.reset must be callable")
+    reset()
 
 
 def call_policy(policy: Any, obs: np.ndarray, info: dict[str, Any]) -> int:
@@ -256,6 +264,54 @@ def call_policy(policy: Any, obs: np.ndarray, info: dict[str, Any]) -> int:
     if isinstance(action, (tuple, list)) and action:
         action = action[0]
     return int(np.asarray(action).item())
+
+
+def build_policy_info(
+    *,
+    info_mode: str,
+    raw_info: dict[str, Any],
+    last_reward: float,
+    task_id: str | None,
+) -> dict[str, Any]:
+    if info_mode == "full":
+        return raw_info
+    if info_mode != "safe":
+        raise ValueError(f"unknown info mode {info_mode!r}")
+    return build_safe_info(
+        raw_info=raw_info,
+        last_reward=last_reward,
+        task_id=task_id,
+    )
+
+
+def build_safe_info(
+    *,
+    raw_info: dict[str, Any],
+    last_reward: float,
+    task_id: str | None,
+) -> dict[str, Any]:
+    policy_info = {
+        "last_reward": float(last_reward),
+        "inventory": _safe_inventory_info(raw_info),
+    }
+    if task_id is not None:
+        policy_info["task_id"] = task_id
+    return policy_info
+
+
+def _safe_inventory_info(raw_info: dict[str, Any]) -> dict[str, Any]:
+    inventory = raw_info.get("inventory", {})
+    player = raw_info.get("player", {})
+    if not isinstance(inventory, dict) and isinstance(player, dict):
+        inventory = player.get("inventory", {})
+    inventory = inventory if isinstance(inventory, dict) else {}
+    return {
+        "gold": copy.deepcopy(inventory.get("gold")),
+        "keys": copy.deepcopy(inventory.get("keys")),
+        "items": copy.deepcopy(inventory.get("items", [])),
+        "tools": copy.deepcopy(inventory.get("tools", [])),
+        "equipped": copy.deepcopy(inventory.get("equipped", {})),
+    }
 
 
 def apply_obs_variant(
@@ -389,10 +445,12 @@ def redraw_obs_from_state(env: Any, *, preset: str, shape: tuple[int, ...]) -> n
             player.facing,
             palette["player"],
         )
-        _draw_tile_outline(
+        _draw_rect_outline(
             frame,
-            player_left // TILE_SIZE,
-            player_top // TILE_SIZE,
+            player_left,
+            player_top,
+            player_right,
+            player_bottom,
             palette["player_outline"],
             thickness=1,
             pad=1,
@@ -520,6 +578,24 @@ def _draw_tile_outline(
     pad: int = 0,
 ) -> None:
     left, top, right, bottom = _tile_bounds(col, row, pad=pad)
+    _draw_rect_outline(frame, left, top, right, bottom, color, thickness=thickness)
+
+
+def _draw_rect_outline(
+    frame: np.ndarray,
+    left: int,
+    top: int,
+    right: int,
+    bottom: int,
+    color: tuple[int, int, int],
+    *,
+    thickness: int,
+    pad: int = 0,
+) -> None:
+    left += pad
+    top += pad
+    right -= pad
+    bottom -= pad
     _fill_rect(frame, left, top, right, top + thickness, color)
     _fill_rect(frame, left, bottom - thickness, right, bottom, color)
     _fill_rect(frame, left, top, left + thickness, bottom, color)
@@ -686,11 +762,7 @@ def build_episode_plan(
     color_variants = ["grayscale", "dark", "bright", "high_contrast", "inverted"]
     plan: list[EpisodePlanEntry] = []
     for task_id in task_ids:
-        if task_id in SPATIAL_TASKS:
-            counts = _split_episode_counts(num_envs, (0.5, 0.3, 0.1, 0.1))
-        else:
-            counts = _split_episode_counts(num_envs, (0.8, 0.0, 0.1, 0.1))
-        original_count, spatial_count, color_count, redraw_count = counts
+        original_count, spatial_count, color_count = _split_episode_counts(num_envs, (0.6, 0.3, 0.1))
 
         for episode_index in range(original_count):
             plan.append(
@@ -718,16 +790,6 @@ def build_episode_plan(
                     eval_stage="color",
                     obs_variant=color_variants[episode_index % len(color_variants)],
                     seed=seed + episode_index,
-                )
-            )
-        for episode_index in range(redraw_count):
-            obs_variant = "redraw_geometric" if episode_index % 2 == 0 else "redraw_symbols"
-            plan.append(
-                EpisodePlanEntry(
-                    task_id=task_id,
-                    eval_stage="redraw",
-                    obs_variant=obs_variant,
-                    seed=seed + color_count + episode_index,
                 )
             )
     return plan
@@ -758,6 +820,8 @@ def run_episode(
     obs_variant: str,
     action_repeat: int | None,
     map_variant: str = "default",
+    info_mode: str = "safe",
+    policy_task_id: str | None = None,
 ) -> EpisodeResult:
     env_kwargs: dict[str, Any] = {
         "observation_mode": "pixels",
@@ -772,30 +836,44 @@ def run_episode(
     else:
         variant_map_path = materialize_spatial_map_variant(task_id, map_variant, seed=seed)
         env = make_env(
+            task_id=task_id,
             map_path=variant_map_path,
-            reward_id=task_id,
             **env_kwargs,
         )
-    reset_policy(policy, seed=seed, task_id=task_id)
+    reset_policy(policy)
 
-    raw_obs, info = env.reset(seed=seed)
-    obs = apply_obs_variant(raw_obs, obs_variant, info=info, env=env)
+    raw_obs, raw_info = env.reset(seed=seed)
+    obs = apply_obs_variant(raw_obs, obs_variant, info=raw_info, env=env)
     event_counter: Counter[str] = Counter()
     total_reward = 0.0
+    last_reward = 0.0
     terminated = False
     truncated = False
     steps = 0
+    policy_info = build_policy_info(
+        info_mode=info_mode,
+        raw_info=raw_info,
+        last_reward=last_reward,
+        task_id=policy_task_id,
+    )
 
     try:
         while not (terminated or truncated):
-            action = call_policy(policy, obs, info)
+            action = call_policy(policy, obs, policy_info)
             if not env.action_space.contains(action):
                 raise ValueError(f"policy returned invalid action {action!r} for {task_id}")
-            raw_obs, reward, terminated, truncated, info = env.step(action)
-            obs = apply_obs_variant(raw_obs, obs_variant, info=info, env=env)
+            raw_obs, reward, terminated, truncated, raw_info = env.step(action)
+            obs = apply_obs_variant(raw_obs, obs_variant, info=raw_info, env=env)
             steps += 1
-            total_reward += float(reward)
-            event_counter.update(event_names(info))
+            last_reward = float(reward)
+            total_reward += last_reward
+            event_counter.update(event_names(raw_info))
+            policy_info = build_policy_info(
+                info_mode=info_mode,
+                raw_info=raw_info,
+                last_reward=last_reward,
+                task_id=policy_task_id,
+            )
     finally:
         env.close()
 
@@ -812,8 +890,8 @@ def run_episode(
         total_reward=total_reward,
         terminated=bool(terminated),
         truncated=bool(truncated),
-        success=is_success(info, terminated),
-        terminal_reason=info.get("terminal_reason"),
+        success=is_success(raw_info, terminated),
+        terminal_reason=raw_info.get("terminal_reason"),
         event_counts=dict(sorted(event_counter.items())),
         milestones=milestones,
         map_variant=map_variant,
@@ -822,13 +900,14 @@ def run_episode(
 
 def materialize_spatial_map_variant(task_id: str, variant: str, *, seed: int) -> Path:
     if task_id not in SPATIAL_TASKS:
-        raise ValueError(f"spatial map variants are only defined for Task 1-3, got {task_id!r}")
+        allowed_tasks = ", ".join(sorted(SPATIAL_TASKS))
+        raise ValueError(f"spatial map variants are only defined for {allowed_tasks}, got {task_id!r}")
     if variant not in SPATIAL_MAP_VARIANTS:
         allowed = ", ".join(SPATIAL_MAP_VARIANTS)
         raise ValueError(f"unknown spatial map variant {variant!r}, allowed: {allowed}")
 
     source_map = load_map(map_id=task_id)
-    temp_root = Path(tempfile.mkdtemp(prefix="nesylink_spatial_", dir="/private/tmp"))
+    temp_root = Path(tempfile.mkdtemp(prefix="nesylink_spatial_"))
     del seed
 
     if source_map.name == "dungeon.json":
@@ -846,8 +925,14 @@ def materialize_spatial_map_variant(task_id: str, variant: str, *, seed: int) ->
 
 
 def _patch_spatial_dungeon(task_id: str, variant: str, task_dir: Path) -> None:
-    del task_id
-    patches = _task3_spatial_patch(variant)
+    if task_id == "mathematical_logic/task_3":
+        patches = _task3_spatial_patch(variant)
+    elif task_id == "mathematical_logic/task_4":
+        patches = _task4_spatial_patch(variant)
+    elif task_id == "mathematical_logic/task_5":
+        patches = _task5_spatial_patch(variant)
+    else:
+        raise ValueError(f"dungeon spatial variants are not defined for {task_id!r}")
     for room_file, room_patch in patches.items():
         path = task_dir / "rooms" / room_file
         payload = _read_json_file(path)
@@ -973,6 +1058,81 @@ def _task3_spatial_patch(variant: str) -> dict[str, dict[str, Any]]:
             "key_room.json": {
                 "spawns": {"default": [8, 4], "from_east": [8, 4]},
                 "objects": {"return_key_chest": [3, 5]},
+            },
+        },
+    }
+    return patches[variant]
+
+
+def _task4_spatial_patch(variant: str) -> dict[str, dict[str, Any]]:
+    patches = {
+        "spatial_a": {
+            "west.json": {"objects": {"bridge_switch": [5, 3]}},
+            "east.json": {"objects": {"sword_chest": [6, 3]}},
+            "north.json": {"objects": {"key_chest": [5, 2]}},
+            "south.json": {"objects": {"guardian": [5, 4]}},
+            "center.json": {"objects": {"final_chest": [5, 4]}},
+        },
+        "spatial_b": {
+            "west.json": {"objects": {"bridge_switch": [3, 4]}},
+            "east.json": {"objects": {"sword_chest": [4, 2]}},
+            "north.json": {"objects": {"key_chest": [3, 3]}},
+            "south.json": {"objects": {"guardian": [3, 4]}},
+            "center.json": {"objects": {"final_chest": [3, 3]}},
+        },
+        "spatial_c": {
+            "west.json": {"objects": {"bridge_switch": [6, 5]}},
+            "east.json": {"objects": {"sword_chest": [7, 5]}},
+            "north.json": {"objects": {"key_chest": [6, 4]}},
+            "south.json": {"objects": {"guardian": [6, 5]}},
+            "center.json": {"objects": {"final_chest": [6, 4]}},
+        },
+    }
+    return patches[variant]
+
+
+def _task5_spatial_patch(variant: str) -> dict[str, dict[str, Any]]:
+    patches = {
+        "spatial_a": {
+            "room_0_0.json": {
+                "objects": {"chest_1": [3, 2], "npc_1": [8, 6], "button_1": [2, 5], "monster_1": [7, 3]},
+            },
+            "room_1_0.json": {
+                "objects": {"chest_1": [7, 2], "npc_1": [6, 6], "monster_1": [8, 5]},
+            },
+            "room_0_1.json": {
+                "objects": {"chest_1": [8, 4], "npc_1": [1, 2], "monster_1": [6, 5], "trap_1": [1, 4]},
+            },
+            "room_-1_0.json": {
+                "objects": {"chest_1": [2, 5], "npc_1": [8, 6], "monster_1": [2, 3], "monster_2": [6, 2]},
+            },
+        },
+        "spatial_b": {
+            "room_0_0.json": {
+                "objects": {"chest_1": [4, 1], "npc_1": [8, 5], "button_1": [1, 6], "monster_1": [7, 2]},
+            },
+            "room_1_0.json": {
+                "objects": {"chest_1": [6, 1], "npc_1": [8, 6], "monster_1": [7, 6]},
+            },
+            "room_0_1.json": {
+                "objects": {"chest_1": [7, 5], "npc_1": [3, 1], "monster_1": [6, 4], "trap_1": [2, 5]},
+            },
+            "room_-1_0.json": {
+                "objects": {"chest_1": [3, 6], "npc_1": [7, 5], "monster_1": [3, 4], "monster_2": [6, 4]},
+            },
+        },
+        "spatial_c": {
+            "room_0_0.json": {
+                "objects": {"chest_1": [2, 2], "npc_1": [8, 4], "button_1": [3, 6], "monster_1": [7, 5]},
+            },
+            "room_1_0.json": {
+                "objects": {"chest_1": [8, 1], "npc_1": [6, 5], "monster_1": [8, 6]},
+            },
+            "room_0_1.json": {
+                "objects": {"chest_1": [8, 6], "npc_1": [1, 1], "monster_1": [7, 6], "trap_1": [1, 6]},
+            },
+            "room_-1_0.json": {
+                "objects": {"chest_1": [1, 6], "npc_1": [8, 5], "monster_1": [2, 5], "monster_2": [7, 3]},
             },
         },
     }
@@ -1106,6 +1266,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-repeat", type=int, default=None, help="Override task action_repeat during evaluation.")
     parser.add_argument("--render-mode", default=None, choices=["rgb_array"], help="Optional render mode.")
     parser.add_argument(
+        "--info-mode",
+        choices=["safe", "full"],
+        default="safe",
+        help="Information passed to the policy. Use safe for official evaluation; full is for local debugging.",
+    )
+    parser.add_argument(
         "--obs-variants",
         nargs="+",
         default=["default"],
@@ -1116,9 +1282,8 @@ def parse_args() -> argparse.Namespace:
         "--robustness-suite",
         action="store_true",
         help=(
-            "Run a proportional robustness suite. Task 1-3 use 50% original, 30% spatial "
-            "map perturbations, 10% color shifts, and 10% redraws. Task 4-5 use 80% "
-            "original, 10% color shifts, and 10% redraws."
+            "Run a proportional robustness suite: 60%% original episodes, "
+            "30%% spatial map perturbation episodes, and 10%% color-shift episodes."
         ),
     )
     parser.add_argument("--json-out", type=Path, default=None, help="Optional path for detailed JSON results.")
@@ -1132,7 +1297,7 @@ def main() -> None:
     if args.action_repeat is not None and args.action_repeat < 1:
         raise ValueError("--action-repeat must be >= 1")
 
-    policies_by_task = resolve_policies(
+    policy_bindings_by_task = resolve_policies(
         default_policy_spec=args.policy,
         task_policy_specs=args.task_policy,
         task_ids=args.tasks,
@@ -1146,8 +1311,9 @@ def main() -> None:
         robustness_suite=args.robustness_suite,
     )
     for entry in episode_plan:
+        policy_binding = policy_bindings_by_task[entry.task_id]
         result = run_episode(
-            policy=policies_by_task[entry.task_id],
+            policy=policy_binding.policy,
             task_id=entry.task_id,
             eval_stage=entry.eval_stage,
             seed=entry.seed,
@@ -1156,6 +1322,8 @@ def main() -> None:
             obs_variant=entry.obs_variant,
             action_repeat=args.action_repeat,
             map_variant=entry.map_variant,
+            info_mode=args.info_mode,
+            policy_task_id=entry.task_id if policy_binding.receives_task_id else None,
         )
         results.append(result)
         print(
