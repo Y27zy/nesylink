@@ -1,3 +1,5 @@
+import «Environment»
+
 /-!
   Strategy formalization skeleton.
 
@@ -5,11 +7,9 @@
   controller structure stabilizes.
 -/
 
-import «Environment»
-
 namespace NesyLink
 
-def Path := List Position
+abbrev Path := List Position
 
 def PathStartsAt (p : Path) (start : Position) : Prop :=
   p.head? = some start
