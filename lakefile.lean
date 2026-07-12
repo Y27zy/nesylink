@@ -5,5 +5,5 @@ package «nesylink» where
 
 @[default_target]
 lean_lib «NesyLinkProofs» where
-  srcDir := "lean"
+  srcDir := "submissions/lean"
   roots := #[`Environment, `Strategy, `TaskProofs]
