@@ -1,0 +1,43 @@
+{
+  "task_id": "mathematical_logic/task_3",
+  "policy": "submissions.student_policy:make_policy",
+  "seed": 1,
+  "map_variant": "spatial_b",
+  "obs_variant": "default",
+  "steps": 988,
+  "total_reward": 177.2700000000001,
+  "success": true,
+  "terminal_reason": "world_completed",
+  "screenshots": [
+    {
+      "milestone": "start",
+      "step": 0,
+      "path": "00_start.png"
+    },
+    {
+      "milestone": "monster_killed",
+      "step": 144,
+      "path": "01_monster_killed.png"
+    },
+    {
+      "milestone": "key_collected",
+      "step": 672,
+      "path": "02_key_collected.png"
+    },
+    {
+      "milestone": "chest_opened",
+      "step": 672,
+      "path": "03_chest_opened.png"
+    },
+    {
+      "milestone": "door_opened",
+      "step": 988,
+      "path": "04_door_opened.png"
+    },
+    {
+      "milestone": "world_completed",
+      "step": 988,
+      "path": "05_world_completed.png"
+    }
+  ]
+}

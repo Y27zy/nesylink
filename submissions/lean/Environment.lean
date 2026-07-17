@@ -24,8 +24,10 @@ structure State where
   walls : List Position
   traps : List Position
   chests : List Position
+  openedChests : List Position
   exits : List Position
   monsters : List Position
+  npcs : List Position
   buttons : List Position
   switches : List Position
   bridges : List Position
@@ -55,10 +57,12 @@ def nextPosition (p : Position) : Action → Position
 def isSafe (s : State) (p : Position) : Prop :=
   inBounds p ∧
   p ∉ s.walls ∧
-  p ∉ s.traps ∧
   p ∉ s.monsters ∧
   p ∉ s.chests ∧
-  p ∉ s.gaps
+  p ∉ s.openedChests ∧
+  p ∉ s.npcs ∧
+  (p ∉ s.traps ∨ p ∈ s.bridges) ∧
+  (p ∉ s.gaps ∨ p ∈ s.bridges)
 
 def GoalReached (s : State) : Prop :=
   s.player ∈ s.exits
@@ -80,7 +84,6 @@ inductive Step : State → Action → State → Prop where
       Step s Action.shield s
 
 def SafeState (s : State) : Prop :=
-  inBounds s.player ∧ s.player ∉ s.walls ∧ s.player ∉ s.traps
+  isSafe s s.player
 
 end NesyLink
-

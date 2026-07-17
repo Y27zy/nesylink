@@ -12,6 +12,7 @@ from nesylink.core.constants import (
     ACTION_UP,
     MAP_HEIGHT_TILES,
     MAP_WIDTH_TILES,
+    TILE_SIZE,
 )
 
 from ..planner import actions_for_tile_path, bfs_path, bfs_path_to_adjacent_target
@@ -175,6 +176,10 @@ class Task3Controller:
             return
 
         if state.player in exit_tiles:
+            remaining = int(pending.get("remaining_cross_actions", 0))
+            if remaining > 0:
+                pending["remaining_cross_actions"] = remaining - 1
+                return
             self._mark_exit_blocked(
                 memory,
                 from_room,
@@ -275,6 +280,10 @@ class Task3Controller:
             "direction": direction,
             "exit_tiles": tuple(sorted(goals)),
             "keys": state.keys,
+            # Tile coordinates do not reveal the player's sub-tile pixel
+            # offset. Keep pressing across the boundary for at most one tile
+            # before deciding that an exit is actually blocked.
+            "remaining_cross_actions": TILE_SIZE - 1,
         }
         self._clear_plan_metadata(memory)
         return CROSS_ACTION[direction]
@@ -547,6 +556,11 @@ class Task3Controller:
             return ACTION_NOOP
 
         room_key = self._update_room_tracking(state, memory)
+        pending = memory.notes.get(PENDING_EXIT_KEY)
+        if isinstance(pending, dict):
+            direction = pending.get("direction")
+            if direction in CROSS_ACTION:
+                return CROSS_ACTION[direction]
         self._clear_stale_plan(state, memory)
         if memory.planned_actions:
             return memory.planned_actions.pop(0)

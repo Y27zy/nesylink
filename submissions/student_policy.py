@@ -24,9 +24,18 @@ class Policy:
         self.controller.reset(seed=seed, task_id=task_id)
 
     def act(self, obs: Any, info: dict[str, Any] | None = None) -> int:
+        policy_info = info or {}
+        received_task_id = policy_info.get("task_id")
+        if isinstance(received_task_id, str) and received_task_id != self.task_id:
+            self.task_id = received_task_id
+            self.memory.task_id = received_task_id
+            self.controller = make_controller(received_task_id)
+            self.memory.notes["controller"] = type(self.controller).__name__
+            self.controller.reset(task_id=received_task_id)
+
         # During final inference, do not use hidden info fields such as agent
         # coordinates, room id, entity counts, or dynamic-object truth.
-        inventory = (info or {}).get("inventory", {})
+        inventory = policy_info.get("inventory", {})
         state = extract_symbolic_state(obs, self.memory, inventory=inventory)
         try:
             return int(self.controller.act(state, self.memory))
@@ -36,4 +45,3 @@ class Policy:
 
 def make_policy() -> Policy:
     return Policy()
-

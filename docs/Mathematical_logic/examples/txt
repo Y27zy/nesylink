@@ -1,5 +1,7 @@
 ## Examples 参考实现
 
+> 完整的逐文件阅读顺序、正式测评限制和 Lean 对照说明见同目录 [`GUIDE.md`](GUIDE.md)。
+
 仓库的 `examples/` 目录给出了两个 Python 参考实现，用于演示如何通过当前 `nesylink` 框架接口运行内置任务：
 
 | 文件 | 对应任务 | 说明 |
