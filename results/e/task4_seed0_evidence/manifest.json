@@ -1,0 +1,63 @@
+{
+  "task_id": "mathematical_logic/task_4",
+  "policy": "submissions.student_policy:make_policy",
+  "seed": 0,
+  "map_variant": "default",
+  "obs_variant": "default",
+  "steps": 1137,
+  "total_reward": 264.62999999999914,
+  "success": true,
+  "terminal_reason": "world_completed",
+  "screenshots": [
+    {
+      "milestone": "start",
+      "step": 0,
+      "path": "00_start.png"
+    },
+    {
+      "milestone": "key_collected",
+      "step": 177,
+      "path": "01_key_collected.png"
+    },
+    {
+      "milestone": "chest_opened",
+      "step": 177,
+      "path": "02_chest_opened.png"
+    },
+    {
+      "milestone": "switch_activated",
+      "step": 370,
+      "path": "03_switch_activated.png"
+    },
+    {
+      "milestone": "door_opened",
+      "step": 562,
+      "path": "04_door_opened.png"
+    },
+    {
+      "milestone": "item_collected",
+      "step": 611,
+      "path": "05_item_collected.png"
+    },
+    {
+      "milestone": "monster_killed",
+      "step": 1031,
+      "path": "06_monster_killed.png"
+    },
+    {
+      "milestone": "chest_revealed",
+      "step": 1031,
+      "path": "07_chest_revealed.png"
+    },
+    {
+      "milestone": "gold_collected",
+      "step": 1137,
+      "path": "08_gold_collected.png"
+    },
+    {
+      "milestone": "world_completed",
+      "step": 1137,
+      "path": "09_world_completed.png"
+    }
+  ]
+}
