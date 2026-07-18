@@ -17,6 +17,7 @@ from nesylink.core.constants import (
 
 from ..planner import actions_for_tile_path, bfs_path, bfs_path_to_adjacent_target
 from ..state import AgentMemory, Position, SymbolicState
+from .base import face_then_interact
 
 
 TASK_PHASE_KEY = "task3_phase"
@@ -47,6 +48,12 @@ CROSS_ACTION = {
     "south": ACTION_DOWN,
     "west": ACTION_LEFT,
     "east": ACTION_RIGHT,
+}
+ACTION_DIRECTION = {
+    ACTION_UP: "north",
+    ACTION_RIGHT: "east",
+    ACTION_DOWN: "south",
+    ACTION_LEFT: "west",
 }
 
 
@@ -143,6 +150,36 @@ class Task3Controller:
         memory.current_room_key = room_key
         memory.visited_rooms.add(room_key)
 
+    def _remember_corridor_continuation(
+        self,
+        memory: AgentMemory,
+        room_key: str,
+    ) -> None:
+        exits_by_room = self._note_dict(memory, ROOM_EXITS_KEY)
+        known_directions = set(exits_by_room.get(room_key, set()))
+        if len(known_directions) != 1:
+            return
+        entry_direction = next(iter(known_directions))
+        direction = OPPOSITE[entry_direction]
+        edge = (room_key, direction)
+        if edge in self._note_set(memory, BLOCKED_EXITS_KEY):
+            return
+        exit_tiles_by_room = self._note_dict(memory, ROOM_EXIT_TILES_KEY)
+        room_tiles = exit_tiles_by_room.setdefault(room_key, {})
+        source_tiles = set(room_tiles.get(entry_direction, set()))
+        if not source_tiles:
+            return
+        if direction == "west":
+            candidate_tiles = {(0, y) for _, y in source_tiles}
+        elif direction == "east":
+            candidate_tiles = {(MAP_WIDTH_TILES - 1, y) for _, y in source_tiles}
+        elif direction == "north":
+            candidate_tiles = {(x, 0) for x, _ in source_tiles}
+        else:
+            candidate_tiles = {(x, MAP_HEIGHT_TILES - 1) for x, _ in source_tiles}
+        exits_by_room[room_key] = known_directions | {direction}
+        room_tiles[direction] = candidate_tiles
+
     def _ensure_current_room(self, state: SymbolicState, memory: AgentMemory) -> str:
         if memory.current_room_key is None:
             memory.current_room_key = self._new_room_key(memory)
@@ -193,6 +230,28 @@ class Task3Controller:
             memory.notes[TASK_PHASE_KEY] = "exit_blocked"
             return
 
+        transitioned = (
+            memory.last_reward > 5.0
+            and memory.last_action == CROSS_ACTION.get(direction)
+        )
+        if not transitioned:
+            remaining = int(pending.get("remaining_cross_actions", 0))
+            if remaining > 0:
+                pending["remaining_cross_actions"] = remaining - 1
+                return
+            self._mark_exit_blocked(
+                memory,
+                from_room,
+                direction,
+                keys_before_attempt=keys_before_attempt,
+            )
+            memory.current_room_key = from_room
+            memory.notes.pop(PENDING_EXIT_KEY, None)
+            memory.planned_actions.clear()
+            self._clear_plan_metadata(memory)
+            memory.notes[TASK_PHASE_KEY] = "exit_blocked"
+            return
+
         graph = self._note_dict(memory, ROOM_GRAPH_KEY)
         room_edges = graph.setdefault(from_room, {})
         to_room = room_edges.get(direction)
@@ -207,10 +266,52 @@ class Task3Controller:
         memory.planned_actions.clear()
         self._clear_plan_metadata(memory)
 
+    def _sync_visual_room(self, state: SymbolicState, memory: AgentMemory) -> bool:
+        """Detect room changes even when movement crosses before `_cross_exit`."""
+
+        vision_key = state.raw_features.get("vision_room_key")
+        if not isinstance(vision_key, str):
+            return False
+        visual_rooms = self._note_dict(memory, "task3_visual_rooms")
+        previous_key = memory.notes.get("task3_last_visual_room")
+        if memory.current_room_key is None:
+            memory.current_room_key = visual_rooms.get(vision_key) or self._new_room_key(memory)
+        if previous_key is None:
+            memory.notes["task3_last_visual_room"] = vision_key
+            visual_rooms.setdefault(vision_key, memory.current_room_key)
+            return False
+        if previous_key == vision_key:
+            visual_rooms.setdefault(vision_key, memory.current_room_key)
+            return False
+
+        source = memory.current_room_key
+        destination = visual_rooms.get(vision_key)
+        direction = ACTION_DIRECTION.get(memory.last_action)
+        if memory.last_reward <= 5.0 or direction is None:
+            return False
+        memory.notes["task3_last_visual_room"] = vision_key
+        if destination is None:
+            destination = self._new_room_key(memory)
+            visual_rooms[vision_key] = destination
+        if source is not None and direction is not None and source != destination:
+            graph = self._note_dict(memory, ROOM_GRAPH_KEY)
+            graph.setdefault(source, {})[direction] = destination
+            graph.setdefault(destination, {})[OPPOSITE[direction]] = source
+            self._note_set(memory, TRIED_EXITS_KEY).add((source, direction))
+            self._note_set(memory, BLOCKED_EXITS_KEY).discard((source, direction))
+            self._note_set(memory, KEY_GATED_EXITS_KEY).discard((source, direction))
+        memory.current_room_key = destination
+        memory.notes.pop(PENDING_EXIT_KEY, None)
+        memory.planned_actions.clear()
+        self._clear_plan_metadata(memory)
+        return True
+
     def _update_room_tracking(self, state: SymbolicState, memory: AgentMemory) -> str:
         if memory.current_room_key is None:
             memory.current_room_key = self._new_room_key(memory)
-        self._resolve_pending_exit(state, memory)
+        changed = self._sync_visual_room(state, memory)
+        if not changed:
+            self._resolve_pending_exit(state, memory)
         return self._ensure_current_room(state, memory)
 
     def _clear_stale_plan(self, state: SymbolicState, memory: AgentMemory) -> None:
@@ -255,7 +356,7 @@ class Task3Controller:
     ) -> int | None:
         if path is None:
             return None
-        actions = actions_for_tile_path(path)
+        actions = actions_for_tile_path(path, max_edges=1)
         if not actions:
             return None
         memory.planned_actions = actions
@@ -354,7 +455,7 @@ class Task3Controller:
         )
         if action is not None:
             return action
-        return ACTION_A
+        return ACTION_NOOP
 
     def _open_or_approach_chest(
         self,
@@ -362,8 +463,9 @@ class Task3Controller:
         memory: AgentMemory,
         chests: set[Position],
     ) -> int:
-        if self._adjacent_target(state, chests) is not None:
-            return ACTION_A
+        interaction = face_then_interact(state, memory, chests)
+        if interaction is not None:
+            return interaction
 
         path = bfs_path_to_adjacent_target(state, chests)
         action = self._follow_or_plan(
@@ -375,7 +477,7 @@ class Task3Controller:
         )
         if action is not None:
             return action
-        return ACTION_A
+        return ACTION_NOOP
 
     def _exit_blocked_for_now(
         self,
@@ -556,6 +658,21 @@ class Task3Controller:
             return ACTION_NOOP
 
         room_key = self._update_room_tracking(state, memory)
+        previous_phase = memory.notes.get(TASK_PHASE_KEY)
+        if previous_phase == "handle_monster" and not state.monsters:
+            memory.notes["expect_new_static_chest"] = True
+            memory.notes["task3_reveal_scan_remaining"] = 12
+            memory.planned_actions.clear()
+            self._clear_plan_metadata(memory)
+        reveal_scan = int(memory.notes.get("task3_reveal_scan_remaining", 0))
+        if reveal_scan > 0 and not (state.chests - state.opened_chests):
+            memory.notes["task3_reveal_scan_remaining"] = reveal_scan - 1
+            memory.notes[TASK_PHASE_KEY] = "scan_revealed_chest"
+            return ACTION_NOOP
+        if state.chests - state.opened_chests:
+            memory.notes.pop("task3_reveal_scan_remaining", None)
+        if state.keys > 0:
+            memory.notes.pop("expect_new_static_chest", None)
         pending = memory.notes.get(PENDING_EXIT_KEY)
         if isinstance(pending, dict):
             direction = pending.get("direction")
@@ -577,6 +694,9 @@ class Task3Controller:
         if state.keys <= 0 and state.opened_chests:
             memory.notes[TASK_PHASE_KEY] = "waiting_for_key_update"
             return ACTION_NOOP
+
+        if state.keys <= 0 and memory.notes.get("expect_new_static_chest"):
+            self._remember_corridor_continuation(memory, room_key)
 
         direction = self._select_exit_direction(state, memory, room_key)
         if direction is None:

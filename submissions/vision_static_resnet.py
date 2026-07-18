@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from .state import Position
+from .vision_preprocess import ROBUST_CHANNELS, extract_tile_batch, robust_channels
 
 
 TileLabel = str
@@ -16,8 +17,9 @@ ROOM_WIDTH_TILES = 10
 ROOM_HEIGHT_TILES = 8
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_WEIGHTS_PATH = PROJECT_ROOT / "models" / "static_tile_resnet.pt"
+DEFAULT_WEIGHTS_PATH = PROJECT_ROOT / "models" / "static_tile_multitask.pt"
 
+# Public IDs intentionally match the environment's documented object IDs.
 LABEL_NAMES: tuple[TileLabel, ...] = (
     "floor",
     "wall",
@@ -41,36 +43,17 @@ LABEL_NAMES: tuple[TileLabel, ...] = (
     "player",
 )
 
+LABEL_TO_INDEX = {name: index for index, name in enumerate(LABEL_NAMES)}
+INDEX_TO_LABEL = {index: name for name, index in LABEL_TO_INDEX.items()}
 STATIC_LABELS = LABEL_NAMES
-STATIC_CLASS_TO_INDEX = {label: index for index, label in enumerate(STATIC_LABELS)}
-STATIC_INDEX_TO_CLASS = {index: label for label, index in STATIC_CLASS_TO_INDEX.items()}
-LABEL_TO_INDEX = STATIC_CLASS_TO_INDEX
-INDEX_TO_LABEL = STATIC_INDEX_TO_CLASS
+STATIC_CLASS_TO_INDEX = LABEL_TO_INDEX
+STATIC_INDEX_TO_CLASS = INDEX_TO_LABEL
 
-
-PALETTE: dict[str, tuple[int, int, int]] = {
-    "outline": (8, 8, 16),
-    "highlight": (255, 244, 112),
-    "shadow": (42, 45, 88),
-    "floor_light": (72, 122, 248),
-    "floor_dark": (36, 82, 206),
-    "floor_darker": (24, 52, 138),
-    "wall_light": (255, 86, 146),
-    "wall_mid": (219, 18, 82),
-    "wall_dark": (88, 0, 36),
-    "wall_edge": (255, 44, 112),
-    "player_tunic": (36, 198, 72),
-    "player_tunic_light": (126, 248, 82),
-    "player_face": (240, 154, 52),
-    "player_hair": (86, 42, 18),
-    "chest_wood": (152, 82, 36),
-    "chest_band": (255, 216, 80),
-    "chest_inner": (42, 18, 16),
-    "door_wood": (96, 48, 26),
-    "exit_glow": (255, 244, 112),
-    "coin": (210, 28, 96),
-    "heart": (204, 16, 72),
-}
+TERRAIN_NAMES = ("floor", "wall", "trap_spike", "trap_abyss", "gap", "bridge")
+OBJECT_NAMES = ("none", "chest", "npc", "button", "switch", "exit")
+CHEST_NAMES = ("none", "chest_key", "chest_gold", "chest_heal", "chest_item")
+EXIT_NAMES = ("none", "exit_normal", "exit_locked_key", "exit_conditional")
+STATE_NAMES = ("default", "changed")
 
 
 @dataclass(frozen=True)
@@ -82,140 +65,138 @@ class StaticVisionResult:
     exits: set[Position]
     chest_types: dict[Position, TileLabel]
     exit_types: dict[Position, TileLabel]
+    traps: set[Position]
+    buttons: set[Position]
+    pressed_buttons: set[Position]
+    switches: set[Position]
+    activated_switches: set[Position]
+    bridges: set[Position]
+    gaps: set[Position]
     labels: dict[Position, TileLabel]
     label_ids: dict[Position, int]
     confidences: dict[Position, float]
+    uncertain: set[Position]
     backend: str
 
 
-class OptionalResNetTileClassifier:
-    """Small ResNet-style tile classifier with a rule fallback.
+class StaticMultiHeadCNN:
+    """Factory for the batched tile network without importing torch eagerly."""
 
-    If `models/static_tile_resnet.pt` exists and PyTorch is available, this
-    class uses it. Otherwise it uses deterministic color rules. This keeps the
-    submission runnable before training weights are ready.
-    """
-
-    def __init__(self, weights_path: Path = DEFAULT_WEIGHTS_PATH) -> None:
-        self.weights_path = weights_path
-        self.model: Any | None = None
-        self.torch: Any | None = None
-        self.backend = "rules"
-        self._try_load_resnet()
-
-    def classify(
-        self,
-        tile: np.ndarray,
-        *,
-        allow_exit: bool = True,
-    ) -> tuple[TileLabel, float]:
-        if self.model is not None and self.torch is not None:
-            label, confidence = self._classify_with_resnet(tile)
-            if label != "exit" or allow_exit:
-                return label, confidence
-        return classify_static_tile_rules(tile, allow_exit=allow_exit)
-
-    def _try_load_resnet(self) -> None:
-        if not self.weights_path.exists():
-            return
-        try:
-            import torch
-            from torch import nn
-        except Exception:
-            return
-
-        try:
-            model = TinyResNet(num_classes=len(STATIC_LABELS), nn=nn)
-            payload = torch.load(self.weights_path, map_location="cpu")
-            state_dict = payload.get("model_state_dict", payload) if isinstance(payload, dict) else payload
-            model.load_state_dict(state_dict)
-            model.eval()
-            self.model = model
-            self.torch = torch
-            self.backend = "resnet"
-        except Exception:
-            self.model = None
-            self.torch = None
-            self.backend = "rules"
-
-    def _classify_with_resnet(self, tile: np.ndarray) -> tuple[TileLabel, float]:
-        assert self.model is not None
-        assert self.torch is not None
-
-        tensor = self.torch.from_numpy(tile.astype(np.float32) / 255.0)
-        tensor = tensor.permute(2, 0, 1).unsqueeze(0)
-        with self.torch.no_grad():
-            logits = self.model(tensor)
-            probs = self.torch.softmax(logits, dim=1)[0]
-            index = int(self.torch.argmax(probs).item())
-            confidence = float(probs[index].item())
-        return STATIC_INDEX_TO_CLASS.get(index, "unknown"), confidence
-
-
-class TinyResNet:
-    """A tiny ResNet implementation without importing torch at module import time."""
-
-    def __new__(cls, num_classes: int, nn: Any):  # noqa: D102
+    def __new__(cls, nn: Any):  # noqa: D102
         class ResidualBlock(nn.Module):
             def __init__(self, channels: int) -> None:
                 super().__init__()
-                self.block = nn.Sequential(
-                    nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+                self.layers = nn.Sequential(
+                    nn.Conv2d(channels, channels, 3, padding=1, bias=False),
                     nn.BatchNorm2d(channels),
                     nn.ReLU(inplace=True),
-                    nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+                    nn.Conv2d(channels, channels, 3, padding=1, bias=False),
                     nn.BatchNorm2d(channels),
                 )
                 self.relu = nn.ReLU(inplace=True)
 
             def forward(self, x):  # noqa: ANN001
-                return self.relu(x + self.block(x))
+                return self.relu(x + self.layers(x))
 
         class Model(nn.Module):
             def __init__(self) -> None:
                 super().__init__()
-                self.stem = nn.Sequential(
-                    nn.Conv2d(3, 32, kernel_size=3, padding=1, bias=False),
-                    nn.BatchNorm2d(32),
+                self.features = nn.Sequential(
+                    nn.Conv2d(ROBUST_CHANNELS, 24, 3, padding=1, bias=False),
+                    nn.BatchNorm2d(24),
                     nn.ReLU(inplace=True),
-                )
-                self.blocks = nn.Sequential(
-                    ResidualBlock(32),
-                    ResidualBlock(32),
-                    nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
+                    ResidualBlock(24),
+                    nn.Conv2d(24, 40, 3, stride=2, padding=1, bias=False),
+                    nn.BatchNorm2d(40),
+                    nn.ReLU(inplace=True),
+                    ResidualBlock(40),
+                    nn.Conv2d(40, 64, 3, stride=2, padding=1, bias=False),
                     nn.BatchNorm2d(64),
                     nn.ReLU(inplace=True),
-                    ResidualBlock(64),
+                    nn.AdaptiveAvgPool2d((1, 1)),
                 )
-                self.pool = nn.AdaptiveAvgPool2d((1, 1))
-                self.fc = nn.Linear(64, num_classes)
+                self.dropout = nn.Dropout(0.08)
+                self.terrain_head = nn.Linear(64, len(TERRAIN_NAMES))
+                self.object_head = nn.Linear(64, len(OBJECT_NAMES))
+                self.chest_head = nn.Linear(64, len(CHEST_NAMES))
+                self.exit_head = nn.Linear(64, len(EXIT_NAMES))
+                self.state_head = nn.Linear(64, len(STATE_NAMES))
 
             def forward(self, x):  # noqa: ANN001
-                x = self.stem(x)
-                x = self.blocks(x)
-                x = self.pool(x).flatten(1)
-                return self.fc(x)
+                features = self.dropout(self.features(x).flatten(1))
+                return {
+                    "terrain": self.terrain_head(features),
+                    "object": self.object_head(features),
+                    "chest": self.chest_head(features),
+                    "exit": self.exit_head(features),
+                    "state": self.state_head(features),
+                }
 
         return Model()
 
 
-_CLASSIFIER: OptionalResNetTileClassifier | None = None
+class BatchedStaticClassifier:
+    def __init__(self, weights_path: Path = DEFAULT_WEIGHTS_PATH) -> None:
+        self.weights_path = weights_path
+        self.model: Any | None = None
+        self.torch: Any | None = None
+        self.backend = "rules"
+        self._load()
+
+    def _load(self) -> None:
+        if not self.weights_path.exists():
+            return
+        try:
+            import torch
+            from torch import nn
+
+            model = StaticMultiHeadCNN(nn)
+            payload = torch.load(self.weights_path, map_location="cpu", weights_only=False)
+            state_dict = payload.get("model_state_dict", payload)
+            model.load_state_dict(state_dict)
+            model.eval()
+            self.model = model
+            self.torch = torch
+            self.backend = "multitask_cnn"
+        except (ImportError, OSError, RuntimeError, KeyError, ValueError):
+            self.model = None
+            self.torch = None
+            self.backend = "rules"
+
+    def classify_batch(self, tiles: np.ndarray) -> dict[str, np.ndarray]:
+        if self.model is None or self.torch is None:
+            return _classify_batch_rules(tiles)
+        tensor = self.torch.from_numpy(robust_channels(tiles))
+        with self.torch.inference_mode():
+            logits = self.model(tensor)
+            output: dict[str, np.ndarray] = {}
+            for name, values in logits.items():
+                output[name] = self.torch.softmax(values, dim=1).cpu().numpy()
+        return output
 
 
-def get_static_classifier() -> OptionalResNetTileClassifier:
+_CLASSIFIER: BatchedStaticClassifier | None = None
+
+
+def get_static_classifier() -> BatchedStaticClassifier:
     global _CLASSIFIER
     if _CLASSIFIER is None:
-        _CLASSIFIER = OptionalResNetTileClassifier()
+        _CLASSIFIER = BatchedStaticClassifier()
     return _CLASSIFIER
 
 
+def reset_static_classifier() -> None:
+    global _CLASSIFIER
+    _CLASSIFIER = None
+
+
 def extract_static_tiles(obs: np.ndarray) -> StaticVisionResult:
-    """Recognize B-owned static symbols from a raw pixel observation."""
+    """Classify all 80 map tiles in one model call."""
 
     classifier = get_static_classifier()
-    labels: dict[Position, TileLabel] = {}
-    label_ids: dict[Position, int] = {}
-    confidences: dict[Position, float] = {}
+    tiles = extract_tile_batch(obs)
+    probabilities = classifier.classify_batch(tiles)
+
     walls: set[Position] = set()
     floors: set[Position] = set()
     chests: set[Position] = set()
@@ -223,46 +204,100 @@ def extract_static_tiles(obs: np.ndarray) -> StaticVisionResult:
     exits: set[Position] = set()
     chest_types: dict[Position, TileLabel] = {}
     exit_types: dict[Position, TileLabel] = {}
-    for y in range(ROOM_HEIGHT_TILES):
-        for x in range(ROOM_WIDTH_TILES):
-            pos = (x, y)
-            tile = obs[
-                y * TILE_SIZE : (y + 1) * TILE_SIZE,
-                x * TILE_SIZE : (x + 1) * TILE_SIZE,
-            ]
-            if is_open_chest_tile(tile):
-                label = classify_chest_type(tile)
-                labels[pos] = label
-                label_ids[pos] = LABEL_TO_INDEX[label]
-                confidences[pos] = 1.0
+    traps: set[Position] = set()
+    buttons: set[Position] = set()
+    pressed_buttons: set[Position] = set()
+    switches: set[Position] = set()
+    activated_switches: set[Position] = set()
+    bridges: set[Position] = set()
+    gaps: set[Position] = set()
+    labels: dict[Position, TileLabel] = {}
+    label_ids: dict[Position, int] = {}
+    confidences: dict[Position, float] = {}
+    uncertain: set[Position] = set()
+
+    for index in range(ROOM_WIDTH_TILES * ROOM_HEIGHT_TILES):
+        pos = (index % ROOM_WIDTH_TILES, index // ROOM_WIDTH_TILES)
+        terrain_index = int(probabilities["terrain"][index].argmax())
+        object_index = int(probabilities["object"][index].argmax())
+        chest_index = int(probabilities["chest"][index].argmax())
+        exit_index = int(probabilities["exit"][index].argmax())
+        state_index = int(probabilities["state"][index].argmax())
+
+        terrain = TERRAIN_NAMES[terrain_index]
+        obj = OBJECT_NAMES[object_index]
+        label = terrain
+        confidence = float(probabilities["terrain"][index, terrain_index])
+        exit_head_confidence = float(probabilities["exit"][index, exit_index])
+        exit_object_confidence = float(
+            probabilities["object"][index, OBJECT_NAMES.index("exit")]
+        )
+        exit_head_supported = (
+            is_boundary_tile(pos)
+            and exit_index != EXIT_NAMES.index("none")
+            and exit_head_confidence >= 0.82
+            and exit_object_confidence >= 0.08
+        )
+
+        if obj == "chest" and not exit_head_supported:
+            label = CHEST_NAMES[chest_index]
+            if label == "none":
+                label = "chest_item"
+            chests.add(pos)
+            chest_types[pos] = label
+            if state_index == 1:
                 opened_chests.add(pos)
-                chest_types[pos] = label
-                continue
-            label, confidence = classifier.classify(
-                tile,
-                allow_exit=is_boundary_tile(pos),
+            confidence = min(
+                float(probabilities["object"][index, object_index]),
+                float(probabilities["chest"][index, chest_index]),
             )
-            labels[pos] = label
-            label_ids[pos] = LABEL_TO_INDEX.get(label, LABEL_TO_INDEX["floor"])
-            confidences[pos] = confidence
+        elif (obj == "exit" or exit_head_supported) and is_boundary_tile(pos):
+            label = EXIT_NAMES[exit_index]
+            if label == "none":
+                label = "exit_normal"
+            exits.add(pos)
+            exit_types[pos] = label
+            confidence = min(
+                max(
+                    float(probabilities["object"][index, object_index]),
+                    exit_object_confidence,
+                ),
+                exit_head_confidence,
+            )
+        elif obj == "npc":
+            label = "npc"
+            confidence = float(probabilities["object"][index, object_index])
+        elif obj == "button":
+            label = "button"
+            buttons.add(pos)
+            if state_index == 1:
+                pressed_buttons.add(pos)
+            confidence = float(probabilities["object"][index, object_index])
+        elif obj == "switch":
+            label = "switch"
+            switches.add(pos)
+            if state_index == 1:
+                activated_switches.add(pos)
+            confidence = float(probabilities["object"][index, object_index])
 
-            if label == "wall":
-                walls.add(pos)
-            elif is_chest_label(label):
-                chests.add(pos)
-                chest_types[pos] = label
-            elif is_exit_label(label):
-                exits.add(pos)
-                exit_types[pos] = label
-                floors.add(pos)
-            elif label == "floor":
-                floors.add(pos)
+        if terrain == "wall":
+            walls.add(pos)
+        elif terrain in {"trap_spike", "trap_abyss"}:
+            traps.add(pos)
+            if terrain == "trap_abyss":
+                gaps.add(pos)
+        elif terrain == "gap":
+            gaps.add(pos)
+        elif terrain == "bridge":
+            bridges.add(pos)
 
-    for y in range(ROOM_HEIGHT_TILES):
-        for x in range(ROOM_WIDTH_TILES):
-            pos = (x, y)
-            if pos not in walls and pos not in chests and pos not in opened_chests:
-                floors.add(pos)
+        if terrain not in {"wall", "gap", "trap_abyss"}:
+            floors.add(pos)
+        labels[pos] = label
+        label_ids[pos] = LABEL_TO_INDEX[label]
+        confidences[pos] = confidence
+        if confidence < 0.45:
+            uncertain.add(pos)
 
     return StaticVisionResult(
         walls=walls,
@@ -272,140 +307,78 @@ def extract_static_tiles(obs: np.ndarray) -> StaticVisionResult:
         exits=exits,
         chest_types=chest_types,
         exit_types=exit_types,
+        traps=traps,
+        buttons=buttons,
+        pressed_buttons=pressed_buttons,
+        switches=switches,
+        activated_switches=activated_switches,
+        bridges=bridges,
+        gaps=gaps,
         labels=labels,
         label_ids=label_ids,
         confidences=confidences,
+        uncertain=uncertain,
         backend=classifier.backend,
     )
 
 
-def classify_static_tile_rules(
-    tile: np.ndarray,
-    *,
-    allow_exit: bool = True,
-) -> tuple[TileLabel, float]:
-    counts = {
-        name: count_near_color(tile, color, tolerance=14)
-        for name, color in PALETTE.items()
+def _classify_batch_rules(tiles: np.ndarray) -> dict[str, np.ndarray]:
+    """Conservative fallback used only when trained weights are unavailable."""
+
+    count = len(tiles)
+    result = {
+        "terrain": np.zeros((count, len(TERRAIN_NAMES)), dtype=np.float32),
+        "object": np.zeros((count, len(OBJECT_NAMES)), dtype=np.float32),
+        "chest": np.zeros((count, len(CHEST_NAMES)), dtype=np.float32),
+        "exit": np.zeros((count, len(EXIT_NAMES)), dtype=np.float32),
+        "state": np.zeros((count, len(STATE_NAMES)), dtype=np.float32),
     }
+    for values in result.values():
+        values[:, 0] = 1.0
 
-    wall_score = (
-        counts["wall_mid"]
-        + counts["wall_light"]
-        + counts["wall_dark"]
-        + counts["wall_edge"]
-    ) / tile.size * 3
-    chest_score = (
-        counts["chest_wood"]
-        + counts["chest_band"]
-        + counts["chest_inner"]
-    ) / tile.size * 3
-    exit_score = (
-        counts["door_wood"]
-        + counts["exit_glow"]
-        + counts["shadow"]
-    ) / tile.size * 3
-    floor_score = (
-        counts["floor_light"]
-        + counts["floor_dark"]
-        + counts["floor_darker"]
-    ) / tile.size * 3
-
-    if wall_score > 0.22:
-        return "wall", min(1.0, wall_score * 3)
-
-    closed_chest_band = count_near_color(
-        tile[4:7],
-        PALETTE["chest_band"],
-        tolerance=14,
-    )
-    has_closed_chest = counts["chest_wood"] > 25 and closed_chest_band > 18
-    if has_closed_chest:
-        return classify_chest_type(tile), min(1.0, chest_score * 5)
-
-    if allow_exit:
-        # Exits always occupy boundary tiles. This prevents bridge planks and
-        # chest bands from being mistaken for doors.
-        locked_exit = counts["door_wood"] > 25 and counts["outline"] > 20
-        conditional_exit = (
-            counts["exit_glow"] > 12
-            and counts["outline"] > 30
-            and counts["chest_band"] > 20
-            and counts["chest_wood"] < 10
-        )
-        normal_exit = (
-            counts["exit_glow"] > 12
-            and counts["shadow"] > 15
-            and counts["outline"] > 20
-        )
-        if locked_exit:
-            return "exit_locked_key", min(1.0, exit_score * 4)
-        if conditional_exit:
-            return "exit_conditional", min(1.0, exit_score * 4)
-        if normal_exit:
-            return "exit_normal", min(1.0, exit_score * 4)
-
-    if floor_score > 0.25:
-        return "floor", min(1.0, floor_score * 3)
-
-    return "floor", 0.0
-
-
-def is_chest_label(label: TileLabel) -> bool:
-    return label in {"chest_key", "chest_gold", "chest_heal", "chest_item"}
-
-
-def is_exit_label(label: TileLabel) -> bool:
-    return label in {"exit_normal", "exit_locked_key", "exit_conditional"}
-
-
-def classify_chest_type(tile: np.ndarray) -> TileLabel:
-    coin = count_near_color(tile, PALETTE["coin"], tolerance=12)
-    heart = count_near_color(tile, PALETTE["heart"], tolerance=12)
-    if coin >= 8 and coin >= heart:
-        return "chest_gold"
-    if heart >= 8:
-        return "chest_heal"
-
-    # Key icons add yellow pixels beyond the normal chest band at the far
-    # right edge. Item chests currently render without a separate loot icon.
-    key_extension = count_near_color(tile[5:6, 14:16], PALETTE["chest_band"], tolerance=12)
-    if key_extension >= 2:
-        return "chest_key"
-    return "chest_item"
-
-
-def count_near_color(tile: np.ndarray, color: tuple[int, int, int], *, tolerance: int) -> int:
-    return int(color_mask(tile, color, tolerance=tolerance).sum())
-
-
-def is_open_chest_tile(tile: np.ndarray) -> bool:
-    wood = count_near_color(tile, PALETTE["chest_wood"], tolerance=14)
-    top_band = count_near_color(tile[1:4], PALETTE["chest_band"], tolerance=14)
-    closed_band = count_near_color(tile[4:7], PALETTE["chest_band"], tolerance=14)
-    inner = count_near_color(tile[2:7], PALETTE["chest_inner"], tolerance=14)
-    return wood > 25 and top_band >= 12 and closed_band <= 18 and inner >= 12
-
-
-def color_mask(image: np.ndarray, color: tuple[int, int, int], *, tolerance: int) -> np.ndarray:
-    target = np.asarray(color, dtype=np.int16)
-    diff = np.abs(image.astype(np.int16) - target)
-    return np.all(diff <= tolerance, axis=-1)
+    for index, tile in enumerate(tiles):
+        dark = tile.mean(axis=-1) < 18
+        red = tile[..., 0].astype(np.int16)
+        green = tile[..., 1].astype(np.int16)
+        blue = tile[..., 2].astype(np.int16)
+        wall_pixels = (red > green + 70) & (red > blue + 40)
+        wood_pixels = (red > 90) & (red > green * 1.35) & (green > blue)
+        metal_pixels = (np.max(tile, axis=-1) - np.min(tile, axis=-1) < 18) & (red > 100)
+        if dark.mean() > 0.82:
+            result["terrain"][index] = 0
+            result["terrain"][index, TERRAIN_NAMES.index("trap_abyss")] = 1
+        elif wall_pixels.sum() > 80:
+            result["terrain"][index] = 0
+            result["terrain"][index, TERRAIN_NAMES.index("wall")] = 1
+        elif metal_pixels.sum() > 14:
+            result["terrain"][index] = 0
+            result["terrain"][index, TERRAIN_NAMES.index("trap_spike")] = 1
+        elif wood_pixels.sum() > 28:
+            result["object"][index] = 0
+            result["object"][index, OBJECT_NAMES.index("chest")] = 1
+            result["chest"][index] = 0
+            result["chest"][index, CHEST_NAMES.index("chest_item")] = 1
+    return result
 
 
 def is_boundary_tile(pos: Position) -> bool:
     x, y = pos
-    return (
-        x == 0
-        or x == ROOM_WIDTH_TILES - 1
-        or y == 0
-        or y == ROOM_HEIGHT_TILES - 1
-    )
+    return x in {0, ROOM_WIDTH_TILES - 1} or y in {0, ROOM_HEIGHT_TILES - 1}
 
 
-def clamp_tile(pos: Position) -> Position:
-    x, y = pos
-    return (
-        min(max(x, 0), ROOM_WIDTH_TILES - 1),
-        min(max(y, 0), ROOM_HEIGHT_TILES - 1),
-    )
+def is_chest_label(label: str) -> bool:
+    return label.startswith("chest_")
+
+
+def is_exit_label(label: str) -> bool:
+    return label.startswith("exit_")
+
+
+def color_mask(tile: np.ndarray, color: tuple[int, int, int], *, tolerance: int) -> np.ndarray:
+    target = np.asarray(color, dtype=np.int16)
+    delta = np.abs(tile.astype(np.int16) - target)
+    return np.max(delta, axis=-1) <= tolerance
+
+
+def count_near_color(tile: np.ndarray, color: tuple[int, int, int], *, tolerance: int) -> int:
+    return int(color_mask(tile, color, tolerance=tolerance).sum())

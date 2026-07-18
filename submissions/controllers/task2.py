@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from nesylink.core.constants import (
-    ACTION_A,
     ACTION_DOWN,
     ACTION_LEFT,
     ACTION_NOOP,
@@ -12,11 +11,14 @@ from nesylink.core.constants import (
 )
 
 from ..planner import (
+    align_for_path_step,
     actions_for_tile_path,
+    align_to_tile_center,
     bfs_path,
     bfs_path_to_adjacent_target,
 )
 from ..state import AgentMemory, Position, SymbolicState
+from .base import boundary_cross_action, face_then_interact
 
 
 TASK_PHASE_KEY = "task2_phase"
@@ -28,12 +30,33 @@ class Task2Controller:
 
     def _follow_or_plan(
         self,
+        state: SymbolicState,
         memory: AgentMemory,
         path: list[Position] | None,
     ) -> int | None:
         if path is None:
             return None
-        actions = actions_for_tile_path(path)
+        if len(path) >= 2:
+            alignment = align_for_path_step(state, path[1])
+            if alignment:
+                memory.planned_actions = alignment
+                return memory.planned_actions.pop(0)
+        actions = actions_for_tile_path(path, max_edges=1)
+        if not actions:
+            return None
+        memory.planned_actions = actions
+        return memory.planned_actions.pop(0)
+
+    def _align_for_phase(
+        self,
+        state: SymbolicState,
+        memory: AgentMemory,
+        phase: str,
+    ) -> int | None:
+        if memory.notes.get("task2_aligned_phase") == phase:
+            return None
+        memory.notes["task2_aligned_phase"] = phase
+        actions = align_to_tile_center(state)
         if not actions:
             return None
         memory.planned_actions = actions
@@ -50,35 +73,37 @@ class Task2Controller:
         if state.monsters:
             memory.notes[TASK_PHASE_KEY] = "kill_monster"
             path = bfs_path_to_adjacent_target(state, state.monsters)
-            action = self._follow_or_plan(memory, path)
+            action = self._follow_or_plan(state, memory, path)
             if action is not None:
                 return action
-            return ACTION_A
+            interaction = face_then_interact(state, memory, state.monsters)
+            return interaction if interaction is not None else ACTION_NOOP
 
-        if state.keys <= 0 and state.chests:
+        closed_chests = state.chests - state.opened_chests
+        if state.keys <= 0 and closed_chests:
             memory.notes[TASK_PHASE_KEY] = "collect_key"
-            path = bfs_path_to_adjacent_target(state, state.chests)
-            action = self._follow_or_plan(memory, path)
+            alignment = self._align_for_phase(state, memory, "collect_key")
+            if alignment is not None:
+                return alignment
+            path = bfs_path_to_adjacent_target(state, closed_chests)
+            action = self._follow_or_plan(state, memory, path)
             if action is not None:
                 return action
-            return ACTION_A
+            interaction = face_then_interact(state, memory, closed_chests)
+            return interaction if interaction is not None else ACTION_NOOP
 
         if state.keys > 0 and state.exits:
             memory.notes[TASK_PHASE_KEY] = "exit"
+            alignment = self._align_for_phase(state, memory, "exit")
+            if alignment is not None:
+                return alignment
             path = bfs_path(state, state.exits)
-            action = self._follow_or_plan(memory, path)
+            action = self._follow_or_plan(state, memory, path)
             if action is not None:
                 return action
             if state.player in state.exits:
-                x, y = state.player
-                if x == 0:
-                    return ACTION_LEFT
-                if x == MAP_WIDTH_TILES - 1:
-                    return ACTION_RIGHT
-                if y == 0:
-                    return ACTION_UP
-                if y == MAP_HEIGHT_TILES - 1:
-                    return ACTION_DOWN
+                crossing = boundary_cross_action(state.player)
+                return crossing if crossing is not None else ACTION_NOOP
 
         memory.notes[TASK_PHASE_KEY] = "no_action"
         return ACTION_NOOP
