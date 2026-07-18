@@ -1,232 +1,290 @@
- python utils/evaluate_policy.py --policy agent.py --tasks mathematical_logic/task_5 --num-envs 1# What E Have Done - 第一阶段记录
+# What E Have Done
 
-## 概要
+## 1. 当前负责范围与正式提交位置
 
-我负责 `分工.png` 里 **E 部分**：实现 Task 4、Task 5 的控制器，并接入 `agent.py` 端到端跑通。
+E 负责 Task 4 / Task 5 的任务链控制器，以及第二阶段中对应的 Lean 组合证明与评测结果整理：
 
-| 文件 | 作用 | 状态 |
-|------|------|------|
-| `controllers/task4.py` | 旋转桥 + 四房间任务链 | ✅ 已通过 |
-| `controllers/task5.py` | 多房间探索 + 4 宝箱 + HP 约束 | ✅ 已通过 |
-| `vision_interactive.py` | 交互物体颜色识别（按钮/开关/桥/gap） | ✅ 已接入 |
-| `vision.py` | 拼装静态 + 动态 + 交互三层视觉 | ✅ 已补充 |
+- `submissions/controllers/task4.py`：旋转桥、钥匙、剑、南侧守卫、中央最终宝箱。
+- `submissions/controllers/task5.py`：多房间探索、按钮、钥匙、治疗、四宝箱与 HP 预算。
+- `submissions/lean/TaskProofs.lean`：Task 4/5 阶段优先级、完成链，以及 Task 3/4/5 共享组合引理。
+- `results/e/`：Task 4/5 的 `safe` 评测 JSON 与里程碑截图证据。
 
-**当前评估结果（seed=0）：**
+### E 工作完成结论
 
-| 任务 | 结果 | 步数 | 奖励 |
-|------|------|------|------|
-| task_4 | success | 1057 | 251.33 |
-| task_5 | success | 1152 | 162.33 |
+按现有分工，E 的交付已经完成：
 
-Task 5 需打开 **4 个宝箱** 才触发 `world_completed`；当前 4/4 全部完成。
+- 第一阶段 Task 4 / Task 5 controller 已放入 `submissions/`，包内相对导入正确；
+- 正式 `safe` 模式下 seed=0 两端到端通过，并保存 JSON 与里程碑截图；
+- 第二阶段 Task 4/5 阶段证明与完成链、Task 3/4/5 组合引理已通过 `lake build`；
+- 评测命令、结果数字与截图路径已整理进本文档，可供报告直接引用。
+
+
+正式 Python 入口为 `submissions.student_policy:make_policy`。正式 `safe` 评测应使用
+task-specific 绑定，否则共享 `--policy` 收不到 `task_id`，会落不到 Task 4/5 controller：
+
+```bash
+python utils/evaluate_policy.py \
+  --tasks mathematical_logic/task_4 mathematical_logic/task_5 \
+  --task-policy mathematical_logic/task_4=submissions.student_policy:make_policy \
+  --task-policy mathematical_logic/task_5=submissions.student_policy:make_policy \
+  --num-envs 1 \
+  --info-mode safe \
+  --json-out results/e/task45_seed0.json
+```
 
 ---
 
-## 1. 做了什么
+## 2. 信息边界
 
-整体思路和 D 的 Task 3 一样：
+最终推理只使用：
 
-- 从 B/C 的视觉抽象里读 `SymbolicState`（玩家位置、墙、宝箱、怪物、出口等）
-- 用 D 的 `planner.py` 做 BFS 寻路
-- 把路径拆成 `memory.planned_actions`，每帧弹一个动作
-- 复杂交互（桥旋转、开门战斗、绕 NPC）用少量硬编码脚本补位
+- raw RGB `obs`
+- `safe_info["inventory"]`
+- task-specific 绑定公开提供的 `safe_info["task_id"]`
+- `SymbolicState` 和 `AgentMemory`
 
-**主要调用：** `agent.py`、`planner.py`（D）
+没有读取：
 
-**为 Task 4/5 自己补充的视觉部分：** 见下一节。
+- `info["env"]` 或 room id
+- `info["agent"]` 中的坐标、血量和朝向
+- `info["entities"]` / `info["dynamic"]` 的运行时真值
+- reward 事件或完成状态来替代策略判断
+
+控制器内导入约定：
+
+```python
+from ..planner import actions_for_tile_path, bfs_path, bfs_path_to_adjacent_target
+from ..state import AgentMemory, Position, SymbolicState
+```
+
+入口侧使用绝对包路径：`from submissions.controllers import make_controller` 等。
+
+依赖的已有模块（只调用、不改其未完成项）：
+
+| 模块 | 用途 |
+|------|------|
+| `submissions/vision*.py` | 玩家/墙/箱/怪/出口；按钮/开关/桥/gap |
+| `submissions/planner.py` | `bfs_path`、邻接目标、tile→原子动作 |
+| `submissions/student_policy.py` | Policy 入口与按 `task_id` 分派 controller |
 
 ---
 
-## 2. vision 侧补充（Task 4/5 联调时加上的）
+## 3. Task 4：旋转桥任务链
 
-B/C 原有的 StaticNet + DynamicNet 只覆盖墙、宝箱、出口、玩家、怪物。Task 4 要转桥，Task 5 要按按钮，缺 `switches` / `bridges` / `gaps` / `buttons` 时控制器跑不起来，所以在 vision 管线里补了第三层。
+### 3.1 目标与房间顺序
 
-### 调用关系
+按资源推进，而不是固定脚本走完整张图：
 
-```text
-agent.py
-  └─ vision.extract_symbolic_state()
-       ├─ vision_static_resnet   → walls / floors / chests / exits
-       ├─ vision_dynamic_resnet  → player / monsters
-       └─ vision_interactive     → buttons / switches / bridges / gaps / traps  ← 新增
-```
+1. 无钥匙：桥朝北 → 北房开箱拿钥匙；
+2. 有钥匙无剑：桥朝东 → 东房开箱拿剑；
+3. 有剑：桥朝南 → 南房击败守卫；
+4. 守卫确认已死后：回中央，打开揭示出的最终宝箱，触发 `world_completed`。
 
-### `vision_interactive.py`（新建）
+房间由可见出口方向推断（不读隐藏 room id）。中央房间的 gap 用当前桥布局对应的
+可通行 tile 补进 planner；开关在西房，视觉漏检时回退到 `(4, 4)`。
 
-按 tile 扫像素，用颜色规则识别交互物体（backend 标记为 `"colors"`）：
+### 3.2 守卫击败判定
 
-| 识别目标 | 写入字段 | Task 4/5 用途 |
-|----------|----------|---------------|
-| 按钮 | `state.buttons` | Task 5 起点 `(2,6)` 开南门 |
-| 开关 | `state.switches` | Task 4 西侧 `(4,4)` 转桥 |
-| 桥 | `state.bridges` | Task 4 中央 gap 上可通行 tile |
-| 深渊 / gap | `state.gaps`、`state.traps` | Task 4 中央房间 BFS 规划 |
+当前规则：
 
-实现上复用了 `vision_static_resnet` 里的 `color_mask` 和 tile 尺寸常量。
+- 仅在 **南房** 记录“见过/打过守卫”（`t4saw_guardian` / `t4attacked`）；
+- 南房内怪物集合变空后才置 `t4guard`；
+- 相邻攻击达到有限次数后也会强制进入 `t4guard`，避免误检拖死；
+- `t4guard` 后优先回中央，对最终宝箱（或 hub `(4, 4)`）面向后开箱。
 
-### `vision.py`（改动）
+### 3.3 主要 memory 标志
 
-在 `extract_symbolic_state()` 里接入 `extract_interactive_tiles()`，把上述字段写进 `SymbolicState`；若玩家站在同一格，会从 `buttons` / `switches` 里去掉，避免误检。
-
-调试时可看 `state.raw_features["interactive_vision_backend"]`（当前为 `"colors"`）。
-
-### 和控制器的关系
-
-- 视觉识别正常时，Task 4 用 `state.switches` / `state.bridges` 转桥，Task 5 用 `state.buttons` 找按钮。
-- 漏检时控制器仍有 fallback：Task 4 开关 `(4,4)`，Task 5 按钮 `(2,6)`。
-- 这层补充 **不读** `info["agent"]` 等隐藏字段，和 Static/Dynamic 一样只从 pixels 出符号态。
-
----
-
-## 3. Task 4：旋转桥任务
-
-### 任务目标
-
-按顺序完成：**拿钥匙 → 拿剑 → 杀南侧守卫 → 开中央最终宝箱**。
-
-### 策略
-
-根据 `keys` / 是否持剑 / 是否已杀守卫，决定桥该朝哪个方向，然后 BFS 进对应房间；中央房间的 gap 用桥 tile 补通行。
-
-### 流程
-
-```
-无钥匙     → 桥朝 north → 北侧钥匙房
-有钥匙无剑 → 桥朝 east  → 东侧剑房
-有剑       → 桥朝 south → 南侧杀 guardian (4,4)
-守卫已死   → 回中央开最终宝箱
-```
-
-### 实现要点
-
-1. **房间识别** `_room()`：只看可见出口方向，不用隐藏的 room id。曾修过 north/south 识别反了的问题。
-2. **桥状态** `memory.notes["t4bridge"]`：记录 `west_to_north` / `west_to_east` / `west_to_south`。
-3. **中央 gap 规划** `_plan()`：把桥 tile 并入可通行格，其余当 gap，供 BFS 使用。
-4. **过桥** `_cross_south()`：中央向南用固定动作对齐 `(4,x)` 再 DOWN，避免 BFS 在 gap 上来回抖。
-5. **持剑后子流程** `_go_south()` + `t4post`：离东 → 西房切桥 → 回中央 → 过桥 → 杀守卫。
-6. **fallback**：视觉没识别到开关/守卫时，用固定格 `(4,4)`。
-
-### 依赖
-
-| 来源 | 需要的字段 |
-|------|-----------|
-| 视觉（静态/动态，B/C） | `player`、`exits`、`walls`、`chests`、`monsters`、`keys` |
-| 视觉（交互，§2 补充） | `switches`、`bridges`、`gaps` |
-| D planner | `bfs_path`、`bfs_path_to_adjacent_target`、`actions_for_tile_path` |
+| 标志 | 含义 |
+|------|------|
+| `t4bridge` | 当前桥状态估计：`west_to_north` / `west_to_east` / `west_to_south` |
+| `t4post` | 持剑后子流程阶段（离东、切桥、过桥、击杀等） |
+| `t4guard` | 守卫已确认击败，转入最终宝箱 |
+| `t4saw_guardian` / `t4attacked` / `t4attack_hits` | 南房战斗进度 |
 
 ---
 
 ## 4. Task 5：多房间 + HP 预算
 
-### 任务目标
+### 4.1 阶段顺序
 
-起点按按钮开南门 → 南侧拿钥匙 → 开东门 → 东房治疗 → 开起点金币 → 开西房金币 → `world_completed`。
+用 `memory.notes` 串行推进，前一阶段完成才进入下一阶段：
 
-### 和 Task 4 最大的区别
-
-Task 5 除了寻路，还要管 **HP**：环境里每 **200 步掉 1 HP**（初始 5 HP），step 1000 可能直接死亡。所以策略重点是 **少受伤、阶段顺序别乱**，不是单纯走最短步数。
-
-### 阶段顺序
-
-用 `memory.notes` 里的标志位串行推进，前一个完成才进下一个：
-
-```
-t5btn → t5key → t5gate → t5healed → t5sgold → t5wgold
-  │       │        │         │          │          └─ 西房金箱 (2,6)
-  │       │        │         │          └─ 起点金箱 (4,2)
-  │       │        │         └─ 东房治疗箱 (7,1)
-  │       │        └─ EAST_GATE_BURST 开东门
-  │       └─ 南侧钥匙，再北返回起点
-  └─ 踩按钮 (2,6) 开南门
+```text
+t5btn → t5key → t5gate / t5healed → t5sgold → t5wgold
 ```
 
-### 三段必须硬编码的脚本
+对应行为：
 
-纯 BFS 搞不定的场景，保留了 3 段脚本（其余全走 planner）：
+1. 踩起点按钮开南门；
+2. 南侧开钥匙箱，护盾北穿返回；
+3. 开东门进入东房，打开治疗箱；
+4. 回起点开金箱；
+5. 进西房开最后金箱，触发 `world_completed`（需累计打开 4 个宝箱）。
 
-| 脚本 | 什么时候用 | 干什么 |
-|------|-----------|--------|
-| `NORTH_CROSS` | 南侧北出口回起点 | `[B]×8 + UP`，开盾北穿，避免 chaser 扣血（通关关键） |
-| `EAST_GATE_BURST` | 有钥匙后开东门 | 从 `(4,6)` 附近 burst：上移 + 右移 + 攻击，过 chaser 开门 |
-| `WEST_GOLD_SCRIPT` | 进西房后开金箱 | 开盾下沉到 `(8,6)`，走底行绕开 `(7,6)` NPC，到 `(2,7)` 再 `UP+A` |
+### 4.2 HP 与脚本段
 
-### 危险格规避
+环境约每 200 步掉 1 HP。因此策略重点是少受伤、阶段不乱序。纯 BFS 不稳的几段保留
+固定动作序列：
 
-BFS 时会额外屏蔽一些格，避免走错：
+| 脚本 | 作用 |
+|------|------|
+| `NORTH_CROSS` | 南侧北出口护盾穿越，减少 chaser 扣血 |
+| `EAST_GATE_BURST` | 有钥匙后冲东门 |
+| `WEST_GOLD_SCRIPT` | 西房绕 NPC 到底行再开金箱 |
 
-- **起点西行** `START_WEST_DANGER`：`(7,4)` chaser、`(7,6)` NPC、`(5,4)`
-- **南侧** `SOUTH_BLOCK`：`(1,5)`、`(6,6)` + 动态怪物格
-- **按钮**：要 **踩上去** 才触发，不是站在旁边按 A
-
-### seed=0 典型时间线（方便对照 log）
-
-| 步数 | 事件 | HP |
-|------|------|-----|
-| ~379 | 护盾北穿回起点 | 4 |
-| ~515 | 进东门 | 3 |
-| ~628 | 东房治疗 | 3 |
-| ~885 | 开起点金箱 | 2 |
-| ~981 | 进西房 | 2 |
-| ~1118 | 开西金箱 | 1 |
-| 1152 | 完成 | — |
-
-### 依赖
-
-| 来源 | 需要的字段 |
-|------|-----------|
-| 视觉（静态/动态，B/C） | `player`、`exits`、`walls`、`chests`、`keys`、`monsters` |
-| 视觉（交互，§2 补充） | `buttons` |
-| D planner | 同上 Task 4 |
-| 环境规则 | `task_5.py` 里 `_DRAIN_INTERVAL = 200` 的 HP 衰减 |
+危险格规避示例：起点西行屏蔽 chaser/NPC 相关格；南侧屏蔽固定阻挡格并并上动态怪物格。
+按钮必须 **踩上去** 触发，不是邻接按 `ACTION_A`。
 
 ---
 
-## 5. 接口约定
+## 5. Python 验证结果
 
-控制器 **只读** `SymbolicState` + `AgentMemory`
+结果保存在 `results/e/`。
 
-- 用：`state.player`、`state.chests`、`memory.planned_actions` 等
-
-视觉偶尔漏检时，有 fallback 坐标：
-
-- Task 4 开关 / 守卫：`(4, 4)`
-- Task 5 按钮：`(2, 6)`
-
-如果交互视觉稳定，控制器基本不用动；Task 5 对 HP 和 chaser 位置更敏感。交互层维护在 `vision_interactive.py`。
-
----
-
-## 6. 怎么验证
+### 5.1 Task 4 / Task 5（seed=0，safe）
 
 ```bash
-# 编译
-python -m py_compile controllers/task4.py controllers/task5.py vision.py vision_interactive.py
-
-# 单 seed 评估
-python utils/evaluate_policy.py --policy agent.py --tasks mathematical_logic/task_4 mathematical_logic/task_5 --num-envs 1
-
-# 多 seed 回归（可选）
-python utils/evaluate_policy.py --policy agent.py --tasks mathematical_logic/task_4 mathematical_logic/task_5 --num-envs 10
+python utils/evaluate_policy.py \
+  --tasks mathematical_logic/task_4 mathematical_logic/task_5 \
+  --task-policy mathematical_logic/task_4=submissions.student_policy:make_policy \
+  --task-policy mathematical_logic/task_5=submissions.student_policy:make_policy \
+  --num-envs 1 \
+  --info-mode safe \
+  --json-out results/e/task45_seed0.json
 ```
 
-Task 4 应看到全部 milestone = 1.0；Task 5 应看到 `world_completed=1` 且 `chest_opened` 合计 4 次。
+| 任务 | success | steps | reward | terminal_reason | JSON |
+|------|---------|------:|-------:|-----------------|------|
+| task_4 | True | 1137 | 264.630 | world_completed | `results/e/task4_seed0.json` / `task45_seed0.json` |
+| task_5 | True | 1152 | 162.330 | world_completed | `results/e/task5_seed0.json` / `task45_seed0.json` |
+
+Task 4 里程碑：`switch_activated`、`key_collected`、`door_opened`、`item_collected`、
+`monster_killed`、`gold_collected`、`world_completed`。
+
+Task 5 里程碑：`button_pressed`、`key_collected`、`door_opened`、`agent_healed`、
+`gold_collected`、`chest_opened` 合计 4 次、`world_completed`。
+
+### 5.2 单独重跑
+
+```bash
+# 仅 Task 4
+python utils/evaluate_policy.py \
+  --tasks mathematical_logic/task_4 \
+  --task-policy mathematical_logic/task_4=submissions.student_policy:make_policy \
+  --num-envs 1 --info-mode safe --json-out results/e/task4_seed0.json
+
+# 仅 Task 5
+python utils/evaluate_policy.py \
+  --tasks mathematical_logic/task_5 \
+  --task-policy mathematical_logic/task_5=submissions.student_policy:make_policy \
+  --num-envs 1 --info-mode safe --json-out results/e/task5_seed0.json
+```
 
 ---
 
-## 7. 注意
+## 6. 可复现截图证据
 
-1. **Task 4** 已通过且步数 ~1057，策略比较紧，大改容易回归失败。
-2. **Task 5** 瓶颈是 **HP 不是步数上限**（2000 步够用，但 1000 步附近可能因 HP 归零死亡）。
-3. **硬编码脚本** 是按 seed=0 地图调的；换 seed 或改地图要重跑评估。
-4. **跨房间** 时会清 BFS 计划（`t5prev`）；脚本执行中（`t5script`）不会被打断。
+使用 `utils/capture_policy_evidence.py`，在正式 `safe_info` 下于首次出现关键事件时保存
+渲染帧和 `manifest.json`。
+
+### 6.1 Task 4
+
+```bash
+python utils/capture_policy_evidence.py \
+  --policy submissions.student_policy:make_policy \
+  --task mathematical_logic/task_4 \
+  --seed 0 \
+  --output-dir results/e/task4_seed0_evidence \
+  --milestones switch_activated key_collected item_collected door_opened \
+               monster_killed chest_opened chest_revealed gold_collected world_completed
+```
+
+轨迹：成功，1137 steps，reward 264.630。关键帧：
+
+| 文件 | 事件 | step |
+|------|------|-----:|
+| `00_start.png` | start | 0 |
+| `01_key_collected.png` | key_collected | 177 |
+| `03_switch_activated.png` | switch_activated | 370 |
+| `04_door_opened.png` | door_opened | 562 |
+| `05_item_collected.png` | item_collected（剑） | 611 |
+| `06_monster_killed.png` | monster_killed | 1031 |
+| `07_chest_revealed.png` | chest_revealed | 1031 |
+| `08_gold_collected.png` / `09_world_completed.png` | 通关 | 1137 |
+
+详见 `results/e/task4_seed0_evidence/manifest.json`。
+
+### 6.2 Task 5
+
+```bash
+python utils/capture_policy_evidence.py \
+  --policy submissions.student_policy:make_policy \
+  --task mathematical_logic/task_5 \
+  --seed 0 \
+  --output-dir results/e/task5_seed0_evidence \
+  --milestones button_pressed key_collected chest_opened door_opened \
+               agent_healed gold_collected world_completed
+```
+
+轨迹：成功，1152 steps，reward 162.330。关键帧：
+
+| 文件 | 事件 | step |
+|------|------|-----:|
+| `00_start.png` | start | 0 |
+| `01_button_pressed.png` | button_pressed | 88 |
+| `02_key_collected.png` | key_collected | 259 |
+| `04_door_opened.png` | door_opened | 516 |
+| `05_agent_healed.png` | agent_healed | 629 |
+| `06_gold_collected.png` | gold_collected | 886 |
+| `07_world_completed.png` | world_completed | 1152 |
+
+详见 `results/e/task5_seed0_evidence/manifest.json`。
 
 ---
 
-## 8. 第一阶段完成情况
+## 7. Lean 形式化与证明
 
-- [x] 实现 `controllers/task4.py`
-- [x] 实现 `controllers/task5.py`
-- [x] 补充 `vision_interactive.py`，并在 `vision.py` 接入交互物体识别
-- [x] 接入 `agent.py`，Task 4/5 端到端通过
-- [x] 不依赖隐藏 info，只用 SymbolicState
-- [ ] Lean 形式化证明（第二阶段，未做）
+工具链由 `lean-toolchain` 固定为 `leanprover/lean4:v4.29.0-rc6`。E 在共享
+`submissions/lean/TaskProofs.lean` 中补充 Task 4/5 与组合部分（环境与 planner 契约文件
+由项目共用）。
+
+### 7.1 Task 4
+
+- `task4Phase`：开箱 → 持剑打守卫 → 操作开关 → 导航；
+- `Task4Done`：`monsters = [] ∧ keys > 0 ∧ gold > 0`；
+- `BridgeWalkable`：gap 上需有 bridge 才可走；
+- 定理：`task4_chest_priority`、`task4_attack_after_chests_with_sword`、
+  `task4_switch_when_no_chest_or_fight`、`task4_navigate_otherwise`、
+  `task4_gap_requires_bridge`、`task4_key_sword_kill_chest_chain`。
+
+### 7.2 Task 5
+
+- `task5Phase`：未按按钮 → 开箱 → 清挡路怪物 → 导航；
+- `Task5Done`：无未开宝箱且 `keys > 0 ∧ gold > 0`；
+- 定理：`task5_button_priority`、`task5_chest_after_buttons`、
+  `task5_clear_monster_when_blocked`、`task5_navigate_when_local_goals_done`、
+  `task5_button_key_chests_chain`。
+
+### 7.3 Task 3/4/5 组合
+
+- `task345_share_adjacent_interaction`
+- `task3_done_implies_key` / `task4_done_implies_key` / `task5_done_implies_key`
+
+证明边界：基于符号状态层，不证明像素分类器对所有图像正确；不把搜索完备性伪装成
+`axiom`。
+
+### 7.4 编译验证
+
+```bash
+lake build
+lake env lean submissions/lean/TaskProofs.lean
+```
+
+两条命令均通过。
+
+---
+
+
+
+
+

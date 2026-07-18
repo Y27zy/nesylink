@@ -1,12 +1,13 @@
-# Lean proofs for Task 1/2/3
+# Lean proofs for Task 1–5
 
 This folder is the submission copy of the Lean formalization.
 
 - `Environment.lean`: symbolic state, bridge-aware safety predicate, and step model.
 - `Strategy.lean`: BFS result contract, safe/adjacent paths, adjacent goals, and
   tile-path-to-action encoding.
-- `TaskProofs.lean`: Task 1/2 phase properties plus Task 3 monster/chest/key
-  priorities and the monster-key-exit completion chain.
+- `TaskProofs.lean`: Task 1/2 phase properties, Task 3 priorities, **Task 4/5
+  phase priorities and completion chains**, plus shared Task 3/4/5 composition
+  lemmas.
 
 Check from the project root:
 
