@@ -6,7 +6,7 @@
 
 ### 1.1 状态、动作、对象与目标定义齐全
 
-环境模型位于 [`Environment.lean`](../lean/Environment.lean)。它把 Python 环境抽象为一个 10×8 的 tile 世界，并给出以下核心定义：
+环境模型位于 Lean 源文件 [`NesyLinkAll.lean`](../lean/NesyLinkAll.lean) 的环境语义部分。它把 Python 环境抽象为一个 10×8 的 tile 世界，并给出以下核心定义：
 
 | 评分点         | Lean 定义                              | 覆盖内容                                                                                                                    |
 | -------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
@@ -38,7 +38,7 @@
 
 ### 1.3 证明基本安全性或不变量
 
-环境层不只定义语义，还证明了以下代表性性质；完整定理位于 [`TaskProofs.lean`](../lean/TaskProofs.lean)。
+环境层不只定义语义，还证明了以下代表性性质；完整定理位于 [`NesyLinkAll.lean`](../lean/NesyLinkAll.lean) 的任务证明部分。
 
 | 性质       | 代表性定理                                                                                                                                     | 实际保证                                                                                                                                |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
@@ -80,7 +80,7 @@ RGB obs + last_reward + inventory
 | 静态多头 CNN   | 9 通道的 16×16 tile；输出 terrain/object/chest/exit/state 五个 head | AdamW；分类交叉熵，state head 权重 0.7                          | seed`2026071801`，400 steps |
 | 动态 CenterNet | 9 通道的 128×160 全帧；输出四类中心热图、offset 和玩家朝向          | AdamW；CenterNet focal loss + 2.0×Smooth-L1 + 0.35×朝向交叉熵 | seed`20260718`，350 steps   |
 
-Lean 不证明这两个网络对所有输入永远正确，而是在 [`Strategy.lean`](../lean/Strategy.lean) 中以 `PerceptionContract observed actual` 明确网络输出与真实符号状态之间的关系：玩家位置一致；真实墙、陷阱、gap、NPC、宝箱和怪物不能被安全层漏报；被观测为活动桥的格子必须真实活动。契约允许保守地多报障碍，因为这可能降低可达性，但不会把危险格误判成安全格。
+Lean 不证明这两个网络对所有输入永远正确，而是在 [`NesyLinkAll.lean`](../lean/NesyLinkAll.lean) 的策略部分以 `PerceptionContract observed actual` 明确网络输出与真实符号状态之间的关系：玩家位置一致；真实墙、陷阱、gap、NPC、宝箱和怪物不能被安全层漏报；被观测为活动桥的格子必须真实活动。契约允许保守地多报障碍，因为这可能降低可达性，但不会把危险格误判成安全格。
 
 ### 2.2 策略合法性、安全性与目标达成
 
@@ -98,19 +98,13 @@ Lean 不证明这两个网络对所有输入永远正确，而是在 [`Strategy.
 
 Python 的 [`planner.py`](../planner.py) 对四邻接安全格执行 BFS，并用 parent map 重建路径；宝箱、怪物和开关被转换为“到达其安全邻接格后面向交互”。Task 3–5 还在线建立房间图，区分已探索、未探索、暂时受阻和钥匙门边，并以房间级 BFS 找到最近 frontier 或待重试目标。五个 controller 复用同一视觉、符号状态和基础 planner，主体差异集中在高层优先级及多房间恢复逻辑：Task 1 取钥匙后开门；Task 2 先战斗再取钥匙；Task 3 在此基础上探索并回溯钥匙门；Task 4 分阶段完成钥匙、剑、怪物和胜利宝箱，并在需要时检查或切换桥；Task 5 优先安全举盾、关键宝箱、按钮和剩余房间探索。
 
-### 2.3 有界搜索完备性与证明边界
-
-`bfsVisited` 和 `bfsRooms` 是可计算的 Lean 定义。`bfs_complete_for_bounded_goal` 证明：若在给定 `depth` 内存在一条由四向移动组成的可行路径，则目标必出现在 BFS 的 visited 中。`room_bfs_complete` 将同一结论推广到房间图；`task345_room_search_complete` 把它连接到多房间策略。因此本项目证明的是评分细则所鼓励的“存在有界可行路径则搜索不会漏掉”，而不是对无限地图作无界完备性声明。
-
-还需明确三点限制：第一，没有证明 Python 实现逐行等价于 Lean 定义；第二，像素动作序列到 tile edge 的成功对齐仍由 Python 执行层负责；第三，五个整关定理是条件式组合定理，其前提明确要求感知契约、合法子路径和相应交互条件成立。正式实验用于检验这些前提在公开鲁棒性套件中是否能端到端满足，不能替代未证明的网络全输入正确性。
-
-三个模块化 Lean 文件按职责分为环境语义、策略/搜索和任务定理，命名直接反映性质；[`NesyLinkAll.lean`](../lean/NesyLinkAll.lean) 按相同顺序提供不含本地 `import` 的自包含合并版。2026-07-19 重新执行 `lake build`，结果为 `Build completed successfully (6 jobs)`；源码中不存在 `sorry`、`admit` 或自定义 `axiom`。
+Lean 源文件 [`NesyLinkAll.lean`](../lean/NesyLinkAll.lean) 按环境语义、策略/搜索和任务定理依次组织，各部分命名直接反映性质。
 
 ## 3. 策略性能
 
 ### 3.1 黑盒接口合规与实验复现设置
 
-`student_policy.py` 不读取玩家坐标、房间 ID、对象坐标、地图真值、事件、终止原因或其他隐藏 `info` 字段。测评器读取完整环境状态仅用于统计成功、事件和 milestone，不进入 Agent 决策。为了成功调用权重数据，务必安装 torch 。
+`student_policy.py` 不读取玩家坐标、房间 ID、对象坐标、地图真值、事件、终止原因或其他隐藏 `info` 字段。测评器读取完整环境状态仅用于统计成功、事件和 milestone，不进入 Agent 决策。实验要求 Python 3.10 或更高版本；在项目根目录执行 `python -m pip install -r submissions/requirements.txt` 即可安装课程环境依赖及额外需要的 PyTorch。完整依赖见 [`requirements.txt`](../requirements.txt)，正式测评只进行 CPU 推理，不要求 CUDA。
 
 命令为：
 

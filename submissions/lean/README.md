@@ -4,12 +4,8 @@
 
 ## 文件关系
 
-- `NesyLinkAll.lean`：按“环境—策略—任务证明”的依赖顺序合并得到的自包含提交文件，不依赖本目录中的其他 Lean 模块。
-- `Environment.lean`：对象、属性、符号状态、动作、交互规则、状态转移、执行轨迹和五关目标谓词。
-- `Strategy.lean`：视觉抽象契约、action mask、tile path、动作编码、单房间 bounded BFS、房间图 BFS 和 `AgentMemory` 的核心不变量。
-- `TaskProofs.lean`：环境机制定理、里程碑单调性、Task 1-5 controller 阶段优先级和五个端到端组合正确性定理。
-
-`NesyLinkAll.lean` 与上述三个模块内容一致；合并版便于单文件提交，模块版保留用于阅读和维护。
+- `NesyLinkAll.lean` 是唯一的 Lean 源文件，不依赖本目录中的其他 Lean 模块。
+- 文件内部依次组织环境语义、可验证策略层和任务级证明，保留原有的职责边界与命名结构。
 
 Python 对应关系：
 
@@ -25,7 +21,7 @@ Python 对应关系：
 
 ## 环境形式化覆盖
 
-`Environment.lean` 对以下内容进行了显式建模：
+`NesyLinkAll.lean` 的环境语义部分对以下内容进行了显式建模：
 
 1. `10 x 8` tile 房间、`16` 像素 tile、位置、房间编号、朝向和七个离散动作。
 2. 类型化宝箱：key、gold、heal、sword、shield、item，并记录胜利宝箱属性；最后一个世界宝箱被打开时更新完成状态。
@@ -112,9 +108,6 @@ Python 对应关系：
 
 ```powershell
 lake build
-lake env lean submissions\lean\Environment.lean
-lake env lean submissions\lean\Strategy.lean
-lake env lean submissions\lean\TaskProofs.lean
 lake env lean submissions\lean\NesyLinkAll.lean
 ```
 

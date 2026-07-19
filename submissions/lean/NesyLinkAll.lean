@@ -1,9 +1,9 @@
 /-!
-  Standalone compilation unit for the complete NesyLink formalization.
+  Self-contained compilation unit for the complete NesyLink formalization.
 
-  This file concatenates Environment.lean, Strategy.lean, and TaskProofs.lean
-  in dependency order and intentionally has no local imports. The three
-  modular source files are retained for readability and maintenance.
+  Environment semantics, the verifiable strategy layer, and task-level proofs
+  are organized as consecutive sections in this file. No local imports or
+  additional Lean source files are required.
 -/
 
 /-!
@@ -13,7 +13,7 @@
   starts at that verified boundary.  It models the object attributes and game
   transitions used by `vision.py`, `state.py`, `planner.py`, and the five task
   controllers.  Pixel-classifier correctness is stated separately as a
-  perception contract in `Strategy.lean`.
+  perception contract in the strategy section below.
 -/
 
 namespace NesyLink
@@ -1854,4 +1854,3 @@ theorem task5_strategy_completes
   ⟩
 
 end NesyLink
-

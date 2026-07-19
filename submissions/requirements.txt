@@ -1,0 +1,12 @@
+# Install from the repository root with:
+#   python -m pip install -r submissions/requirements.txt
+# Python 3.10 or newer is required.
+
+# Base NesyLink runtime dependencies (aligned with pyproject.toml).
+gymnasium>=0.29,<2
+numpy>=1.23,<3
+PyYAML>=6.0,<7
+
+# Required by the submitted static and dynamic vision models.
+# The reported 500-episode evaluation used PyTorch 2.8.0 with CPU inference.
+torch==2.8.0
